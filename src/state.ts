@@ -259,6 +259,7 @@ export class TaskStore {
       const workspaceId = task.workspaceId ?? workspaceIdentity(this.located);
       const boundEvidence = evidence.map((item) => ({ ...normalizeEvidence(item), workspaceId: item.workspaceId ?? workspaceId }));
       for (const item of boundEvidence) {
+        assertEvidence(item);
         if (item.workspaceId !== workspaceId) throw new Error(`Evidence ${item.id} belongs to a different workspace/run`);
         if (isAbsolute(item.source) && item.source.includes("/.pi-yocto/validation/") && !within(item.source, this.located.rootDir)) {
           throw new Error(`Evidence ${item.id} references a different validation run: ${item.source}`);
@@ -267,7 +268,6 @@ export class TaskStore {
           const path = join(this.located.stateDir, "jobs", `${item.jobId}.json`);
           if (!(await pathExists(path)) || (await readJson<JobRecord>(path)).taskId !== task.id) throw new Error(`Evidence ${item.id} job binding is not part of TaskRecord ${task.id}`);
         }
-        assertEvidence(item);
       }
       const known = new Set(task.evidence.map((item) => item.id));
       const appended = boundEvidence.filter((item) => !known.has(item.id));
@@ -287,6 +287,42 @@ export class TaskStore {
         evidence: [...task.evidence, ...appended],
         checkpoints: [...task.checkpoints, { ...checkpoint, createdAt: new Date().toISOString() }],
         ...(finalSummary ? { finalSummary } : {}),
+        updatedAt: new Date().toISOString()
+      };
+      await this.save(next);
+      return next;
+    });
+  }
+
+  /**
+   * Persist evidence produced by a trusted harness tool as soon as the tool has
+   * finished.  Keeping this operation in TaskStore makes the task binding,
+   * workspace binding, and de-duplication atomic; callers no longer have to ask
+   * the model to copy an Evidence object through a later checkpoint call.
+   */
+  async recordEvidence(id: string, evidence: Evidence[]): Promise<TaskRecord> {
+    return withFileLock(`${this.path(id)}.lock`, async () => {
+      const task = await this.load(id);
+      const workspaceId = task.workspaceId ?? workspaceIdentity(this.located);
+      const boundEvidence = evidence.map((item) => ({ ...normalizeEvidence(item), workspaceId: item.workspaceId ?? workspaceId }));
+      for (const item of boundEvidence) {
+        assertEvidence(item);
+        if (item.workspaceId !== workspaceId) throw new Error(`Evidence ${item.id} belongs to a different workspace/run`);
+        if (isAbsolute(item.source) && item.source.includes("/.pi-yocto/validation/") && !within(item.source, this.located.rootDir)) {
+          throw new Error(`Evidence ${item.id} references a different validation run: ${item.source}`);
+        }
+        if (item.jobId) {
+          const path = join(this.located.stateDir, "jobs", `${item.jobId}.json`);
+          if (!(await pathExists(path)) || (await readJson<JobRecord>(path)).taskId !== task.id) throw new Error(`Evidence ${item.id} job binding is not part of TaskRecord ${task.id}`);
+        }
+      }
+      const known = new Set(task.evidence.map((item) => item.id));
+      const appended = boundEvidence.filter((item) => !known.has(item.id));
+      if (!appended.length && task.workspaceId) return task;
+      const next: TaskRecord = {
+        ...task,
+        workspaceId,
+        evidence: [...task.evidence, ...appended],
         updatedAt: new Date().toISOString()
       };
       await this.save(next);
@@ -346,7 +382,14 @@ export class TaskStore {
 
   async reserveJob(id: string, input: { jobId: string; purpose: JobPurpose; fingerprint: string; target: string; iteration?: number }): Promise<TaskRecord> {
     return this.mutate(id, (task) => {
-      if (!task.checkpoints.length || !["EXECUTING", "VERIFYING"].includes(task.phase)) throw new Error(`Task ${id} must checkpoint into EXECUTING/VERIFYING before starting a job`);
+      const allowedPhases = input.purpose === "baseline"
+        ? ["INSPECTING", "PLANNING", "EXECUTING", "VERIFYING"]
+        : ["EXECUTING", "VERIFYING"];
+      if (!task.checkpoints.length || !allowedPhases.includes(task.phase)) {
+        throw new Error(input.purpose === "baseline"
+          ? `Task ${id} must checkpoint into INSPECTING/PLANNING before a baseline job (legacy EXECUTING/VERIFYING is also accepted)`
+          : `Task ${id} must checkpoint into EXECUTING/VERIFYING before starting a ${input.purpose} job`);
+      }
       let currentFixIteration = task.currentFixIteration;
       const attempts = [...task.verificationAttempts];
       if (input.iteration !== undefined) {

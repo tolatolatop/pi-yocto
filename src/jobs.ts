@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, open, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, open, readdir, realpath, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LocatedConfig } from "./config.js";
@@ -53,6 +53,64 @@ export interface StartJobInput {
 
 export interface StartJobResult { job: JobRecord; reused: boolean; }
 
+const qemuModes = new Set(["nographic", "slirp", "kvm", "kvm-vhost", "serial", "snapshot"]);
+
+function within(path: string, root: string): boolean {
+  const absoluteRoot = resolve(root);
+  const absolutePath = resolve(path);
+  return absolutePath === absoluteRoot || absolutePath.startsWith(`${absoluteRoot}/`);
+}
+
+/** Resolve a recipe/image token to the deploy tree's current qemuboot.conf. */
+export async function normalizeQemuArgs(located: LocatedConfig, input: string[]): Promise<string[]> {
+  if (!input.length || input.some((argument) => !/^[A-Za-z0-9+_.:@/-]+$/.test(argument))) throw new Error("QEMU job arguments must be simple runqemu tokens");
+  const deployDir = resolve(located.config.tmpDir ?? join(located.config.buildDir, "tmp"), "deploy", "images", located.config.machine);
+  const modes = input.filter((argument) => qemuModes.has(argument));
+  const selectors = input.filter((argument) => !qemuModes.has(argument) && argument !== located.config.machine);
+  if (selectors.length > 1) throw new Error(`QEMU job accepts one image target or qemuboot.conf, not: ${selectors.join(", ")}`);
+
+  let bootConfig: string | undefined;
+  const selector = selectors[0];
+  if (selector?.endsWith(".qemuboot.conf")) {
+    const candidate = resolve(selector.includes("/") ? located.config.buildDir : deployDir, selector);
+    if (!within(candidate, deployDir) || !(await pathExists(candidate))) throw new Error(`QEMU boot config is missing or outside ${deployDir}: ${candidate}`);
+    const canonical = await realpath(candidate);
+    if (!within(canonical, deployDir)) throw new Error(`QEMU boot config resolves outside ${deployDir}: ${candidate}`);
+    bootConfig = candidate;
+  } else if (selector) {
+    const names = (await readdir(deployDir).catch(() => []))
+      .filter((name) => name.startsWith(`${selector}-${located.config.machine}`) && name.endsWith(".qemuboot.conf"))
+      .sort();
+    const stableNames = names.filter((name) => name === `${selector}-${located.config.machine}.rootfs.qemuboot.conf` || name === `${selector}-${located.config.machine}.qemuboot.conf`);
+    if (stableNames.length === 1) {
+      const stable = join(deployDir, stableNames[0] as string);
+      const canonical = await realpath(stable);
+      if (!within(canonical, deployDir)) throw new Error(`QEMU boot config resolves outside ${deployDir}: ${stable}`);
+      bootConfig = stable;
+    } else {
+      const canonical = new Map<string, string[]>();
+      for (const name of names) {
+        const path = join(deployDir, name);
+        const target = await realpath(path).catch(() => path);
+        canonical.set(target, [...(canonical.get(target) ?? []), path]);
+      }
+      if (canonical.size === 1) bootConfig = [...canonical.keys()][0];
+      else {
+        const detail = names.length ? names.map((name) => join(deployDir, name)).join(", ") : "none";
+        throw new Error(`Expected one qemuboot.conf for image target ${selector} (${located.config.machine}); candidates: ${detail}`);
+      }
+    }
+  }
+
+  // A modes-only invocation remains supported for controlled test doubles and
+  // legacy workspaces.  When a target was supplied, replace all guessed image
+  // tokens (including MACHINE) with the exact deploy configuration.
+  const normalized = bootConfig ? [bootConfig, ...modes] : [...input.filter((argument) => !qemuModes.has(argument)), ...modes];
+  if (!normalized.includes("nographic")) normalized.push("nographic");
+  if (!normalized.includes("slirp")) normalized.push("slirp");
+  return normalized;
+}
+
 export async function startJob(located: LocatedConfig, input: StartJobInput): Promise<StartJobResult> {
   let executable: string;
   let args = [...input.args];
@@ -60,12 +118,7 @@ export async function startJob(located: LocatedConfig, input: StartJobInput): Pr
     validateBitbakeJobArgs(args);
     executable = "bitbake";
   } else if (input.kind === "qemu") {
-    if (!args.length || args.some((arg) => !/^[A-Za-z0-9+_.:@/-]+$/.test(arg))) throw new Error("QEMU job arguments must be simple runqemu tokens");
-    // The harness guest executor communicates through the serial console and
-    // must not require root-owned TAP setup. Supply safe defaults when the
-    // caller only names an image (or omits one of the required modes).
-    if (!args.includes("nographic")) args.push("nographic");
-    if (!args.includes("slirp")) args.push("slirp");
+    args = await normalizeQemuArgs(located, args);
     executable = join(located.config.sourceDir, "scripts", "runqemu");
   } else {
     if (!args.length) args = ["-p"];
@@ -211,4 +264,16 @@ export function jobEvidence(job: JobRecord): Evidence | undefined {
     jobId: job.id,
     ...(job.workspaceId ? { workspaceId: job.workspaceId } : {})
   };
+}
+
+export function jobEvidenceVariants(job: JobRecord): Evidence[] {
+  const primary = jobEvidence(job);
+  if (!primary) return [];
+  if (job.purpose !== "baseline") return [primary];
+  return [primary, ...(["observation", "diagnosis"] as const).map((claimType) => ({
+    ...primary,
+    id: `ev-${sha256(`${job.id}:${job.exitCode}:${job.logOffset}:${claimType}`).slice(0, 16)}`,
+    claimType,
+    fact: `Baseline ${primary.command?.join(" ")} completed with status ${job.status} and exit code ${job.exitCode}; persisted log and artifacts support ${claimType}`
+  }))];
 }

@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { open } from "node:fs/promises";
 import { findConfig } from "./config.js";
 import { GuestCommandStore, quoteGuestArg } from "./guest.js";
-import { JobStore } from "./jobs.js";
+import { jobEvidenceVariants, JobStore } from "./jobs.js";
 import { captureBitbakeEnvironment, readBootId, readProcessStartTicks } from "./process.js";
 import type { JobRecord } from "./types.js";
 import type { GuestCommandRecord } from "./types.js";
@@ -150,12 +150,18 @@ async function main(): Promise<void> {
     const logOffset = (await log.stat()).size;
     const artifacts = status === "SUCCEEDED" ? (await inspectWorkspace(located, false)).artifacts : [];
     await save({ status, exitCode: result.code ?? 128, ...(result.signal ? { signal: result.signal } : {}), completedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(), logOffset, artifacts });
-    await new TaskStore(located).updateJobStatus(job.taskId, job.id, status, job.completedAt).catch(() => undefined);
+    const tasks = new TaskStore(located);
+    await tasks.updateJobStatus(job.taskId, job.id, status, job.completedAt).catch(() => undefined);
+    const evidence = jobEvidenceVariants(job);
+    if (evidence.length) await tasks.recordEvidence(job.taskId, evidence).catch(() => undefined);
     if (activeGuest) await guestStore.complete(activeGuest.id, { status: "FAILED", output: serialBuffer, error: `QEMU exited before guest command completed (${result.code ?? result.signal ?? "unknown"})` }).catch(() => undefined);
   } catch (error) {
     await write(`\n[pi-yocto] worker error: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`).catch(() => undefined);
-    await save({ status: "FAILED", error: error instanceof Error ? error.message : String(error), completedAt: new Date().toISOString() }).catch(() => undefined);
-    await new TaskStore(located).updateJobStatus(job.taskId, job.id, "FAILED", job.completedAt).catch(() => undefined);
+    await save({ status: "FAILED", error: error instanceof Error ? error.message : String(error), completedAt: new Date().toISOString(), exitCode: job.exitCode ?? 128 }).catch(() => undefined);
+    const tasks = new TaskStore(located);
+    await tasks.updateJobStatus(job.taskId, job.id, "FAILED", job.completedAt).catch(() => undefined);
+    const evidence = jobEvidenceVariants(job);
+    if (evidence.length) await tasks.recordEvidence(job.taskId, evidence).catch(() => undefined);
   } finally {
     if (heartbeat) clearInterval(heartbeat);
     if (guestPoll) clearInterval(guestPoll);

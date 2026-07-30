@@ -7,7 +7,7 @@ import type { Evidence, GuestCommandRecord } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
 const deniedExecutables = new Set([
-  "rm", "dd", "mkfs", "reboot", "poweroff", "shutdown", "halt", "mount", "umount", "curl", "wget", "nc", "sh", "bash",
+  "root", "rm", "dd", "mkfs", "reboot", "poweroff", "shutdown", "halt", "mount", "umount", "curl", "wget", "nc", "sh", "bash",
   "ash", "dash", "busybox", "env", "xargs", "find", "sed", "awk", "perl", "python", "python3", "ruby", "lua", "tee", "cp", "mv", "touch",
   "chmod", "chown", "kill", "pkill", "systemctl", "service", "modprobe", "insmod", "rmmod", "opkg", "rpm", "dnf", "apt", "apt-get"
 ]);

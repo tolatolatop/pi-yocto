@@ -70,7 +70,10 @@ function validateMetadata(content: string, path: string): ChangeSetRecord["prefl
   const failures: string[] = [];
   if (content.includes("\0")) failures.push("contains NUL bytes");
   if (/^(?:<{7}|={7}|>{7})/m.test(content)) failures.push("contains merge conflict markers");
-  if (extname(path) === ".bb" && !/^LICENSE\s*(?:\?|\+|:)?=/m.test(content)) failures.push("recipe does not declare LICENSE");
+  // A thin variant/image recipe can legally inherit mandatory fields through
+  // require/include. The post-apply include-aware yocto_review performs the
+  // workspace-bound check; do not force the model to duplicate those fields.
+  if (extname(path) === ".bb" && !/^LICENSE\s*(?:\?|\+|:)?=/m.test(content) && !/^\s*(?:require|include)\s+\S+/m.test(content)) failures.push("recipe does not declare LICENSE or a resolvable include");
   return [{ kind: "metadata-review", path, passed: failures.length === 0, detail: failures.join("; ") || "Basic metadata preflight passed" }];
 }
 

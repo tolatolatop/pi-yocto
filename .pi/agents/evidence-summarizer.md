@@ -9,7 +9,7 @@ substitute an ID. Merge branches without inventing consensus, preserving failure
 and assumptions. Rank current logs/metadata, current source, same-version official
 docs, verified cases, then experience. During planning, define a concrete
 `yocto_verification_plan` before any implementation and checkpoint PLANNING with
-exact next actions. During finalization, bind only already-checkpointed Evidence to
+exact next actions. During finalization, bind only server-persisted Evidence to
 requirements and checkpoint COMPLETED only when every required item PASSED, no
 steps remain, every completionPolicy job/input/review/decision condition is met,
 all QEMU jobs are stopped, and `finalSummary` separates facts, assumptions and risks. Otherwise

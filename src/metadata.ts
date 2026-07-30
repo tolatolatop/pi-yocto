@@ -53,20 +53,25 @@ export async function queryMetadata(located: LocatedConfig, request: { action: M
     umask: 0o022
   });
   const output = request.action === "environment" ? extractVariable(result.stdout, request.variable) : result.stdout;
-  const evidence: Evidence = {
-    id: `ev-${sha256(`${result.command.join("\0")}:${result.code}:${output}`).slice(0, 16)}`,
+  const capturedAt = new Date().toISOString();
+  const outputHash = sha256(`${output}\n${result.stderr}`);
+  const claimTypes: Evidence["claimType"][] = request.action === "parse"
+    ? ["execution"]
+    : ["observation", "configuration", "diagnosis"];
+  const evidence: Evidence[] = claimTypes.map((claimType) => ({
+    id: `ev-${sha256(`${result.command.join("\0")}:${result.code}:${output}:${claimType}`).slice(0, 16)}`,
     kind: "metadata",
     executionDomain: "metadata",
-    claimType: request.action === "parse" ? "execution" : "configuration",
+    claimType,
     source: `${executable}:${request.action}`,
     locator: result.cwd,
-    fact: `${result.command.join(" ")} exited ${result.code}${request.variable ? ` while resolving ${request.variable}` : ""}`,
+    fact: `${result.command.join(" ")} exited ${result.code}${request.variable ? ` while resolving ${request.variable}` : ""}; captured metadata is available for ${claimType}`,
     confidence: result.code === 0 ? "high" : "medium",
-    capturedAt: new Date().toISOString(),
-    sha256: sha256(`${output}\n${result.stderr}`),
+    capturedAt,
+    sha256: outputHash,
     command: result.command,
     exitCode: result.code
-  };
+  }));
   return {
     command: result.command,
     cwd: result.cwd,
@@ -76,6 +81,6 @@ export async function queryMetadata(located: LocatedConfig, request: { action: M
     timedOut: result.timedOut,
     output: output.slice(-2_000_000),
     stderr: result.stderr.slice(-100_000)
-    ,evidence: [evidence]
+    ,evidence
   };
 }
