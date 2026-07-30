@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "e2e-10-full-minimal-v1",
+  "requirements": [
+    { "id": "S10-baseline-metadata", "description": "Current metadata proves variant-full enables extras and uses the shared include/source", "required": true, "expectedDomain": "metadata", "expectedClaimType": "observation" },
+    { "id": "S10-decision", "description": "Explicit coexisting names and alternatives/overwriting are compared and the non-conflicting design is selected", "required": true },
+    { "id": "S10-minimal-metadata", "description": "Post-change metadata proves minimal reuses the shared include with extras disabled", "required": true, "expectedDomain": "metadata", "expectedClaimType": "configuration" },
+    { "id": "S10-review-build", "description": "Review, parse, both variant builds, and image build succeed without file conflicts", "required": true },
+    { "id": "S10-guest-full", "description": "Guest variant-full --mode prints variant=full and exits 0", "required": true, "expectedDomain": "guest", "expectedClaimType": "execution" },
+    { "id": "S10-guest-minimal", "description": "Guest variant-minimal --mode prints variant=minimal and exits 0", "required": true, "expectedDomain": "guest", "expectedClaimType": "execution" },
+    { "id": "S10-incremental", "description": "A second ordinary image build proves both variants and unrelated tasks are reused", "required": true }
+  ],
+  "completion": {
+    "requiredJobs": [
+      { "id": "baseline", "kind": "bitbake", "purpose": "baseline", "target": "variant-full", "allowedStatuses": ["SUCCEEDED"] },
+      { "id": "parse", "kind": "check", "purpose": "parse" },
+      { "id": "minimal", "kind": "bitbake", "purpose": "verification", "target": "variant-minimal" },
+      { "id": "image", "kind": "bitbake", "purpose": "verification", "target": "validation-variant-image" },
+      { "id": "incremental", "kind": "bitbake", "purpose": "incremental-confirmation", "target": "validation-variant-image" },
+      { "id": "qemu", "kind": "qemu", "purpose": "qemu", "allowedStatuses": ["STOPPED"] }
+    ],
+    "requireReview": true,
+    "requireNoActiveJobs": true,
+    "requireNonzeroLogOffsets": true,
+    "requireJobIdentitySnapshots": true,
+    "requireDecisionAnalysis": true
+  }
+}

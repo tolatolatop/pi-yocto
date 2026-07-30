@@ -1,4 +1,4 @@
-# pi-yocto 真实 E2E 验证集 v1
+# pi-yocto 真实 E2E 验证集 v2
 
 本验证集用于在配置好模型 provider 后，检验 `pi-yocto` 是否真的能由 agent
 完成接近日常 Yocto 开发的任务。它不是单元测试或一组固定脚本；每个场景都以
@@ -95,6 +95,11 @@ fixture 本身不可用时记 `BLOCKED_FIXTURE`；provider/API 不可用时记
 3. [E2E-03：package split 导致的 rootfs 回归](scenarios/03-rootfs-package-split.md)
 4. [E2E-04：未生效的 kernel fragment 与 QEMU 验证](scenarios/04-kernel-fragment-qemu.md)
 5. [E2E-05：离线 mirror、后台构建和跨会话恢复](scenarios/05-offline-long-build.md)
+6. [E2E-06：从零集成独立开源软件](scenarios/06-new-oss-recipe.md)
+7. [E2E-07：单个软件包编译优化](scenarios/07-package-optimization.md)
+8. [E2E-08：从指定镜像移除软件包](scenarios/08-remove-package.md)
+9. [E2E-09：runtime 与开发包同时集成](scenarios/09-runtime-dev.md)
+10. [E2E-10：同一源码 full/minimal 双变体共存](scenarios/10-full-minimal-variants.md)
 
 每次结果至少记录：scenario/run ID、provider/model、开始结束时间、Pi session、
 workflow/flow ID、TaskRecord ID、approval ID、JobRecord ID、变更 diff、关键 evidence、

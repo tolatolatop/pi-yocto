@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "e2e-09-runtime-dev-v1",
+  "requirements": [
+    { "id": "S9-ownership", "description": "Current pkgdata/metadata distinguishes libwidget runtime and -dev file ownership", "required": true, "expectedDomain": "metadata", "expectedClaimType": "diagnosis" },
+    { "id": "S9-baseline", "description": "Baseline image evidence proves runtime is installed while libwidget-dev is absent", "required": true, "expectedDomain": "build", "expectedClaimType": "observation" },
+    { "id": "S9-decision", "description": "Explicit image install and global dev-pkgs alternatives are compared and image scope is selected", "required": true },
+    { "id": "S9-review-build", "description": "Review, parse, libwidget, and image builds succeed with both output packages in the manifest", "required": true },
+    { "id": "S9-guest-runtime", "description": "Guest widget-info executes successfully", "required": true, "expectedDomain": "guest", "expectedClaimType": "execution" },
+    { "id": "S9-guest-dev", "description": "Guest evidence proves widget.h, libwidget.pc, and libwidget.so development link exist", "required": true, "expectedDomain": "guest", "expectedClaimType": "execution" },
+    { "id": "S9-incremental", "description": "A second ordinary image build proves task reuse without unrelated dev packages", "required": true }
+  ],
+  "completion": {
+    "requiredJobs": [
+      { "id": "baseline", "kind": "bitbake", "purpose": "baseline", "target": "validation-dev-image", "allowedStatuses": ["SUCCEEDED"] },
+      { "id": "parse", "kind": "check", "purpose": "parse" },
+      { "id": "recipe", "kind": "bitbake", "purpose": "verification", "target": "libwidget" },
+      { "id": "image", "kind": "bitbake", "purpose": "verification", "target": "validation-dev-image" },
+      { "id": "incremental", "kind": "bitbake", "purpose": "incremental-confirmation", "target": "validation-dev-image" },
+      { "id": "qemu", "kind": "qemu", "purpose": "qemu", "allowedStatuses": ["STOPPED"] }
+    ],
+    "requireReview": true,
+    "requireNoActiveJobs": true,
+    "requireNonzeroLogOffsets": true,
+    "requireJobIdentitySnapshots": true,
+    "requireDecisionAnalysis": true
+  }
+}

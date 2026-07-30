@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "e2e-08-remove-package-v1",
+  "requirements": [
+    { "id": "S8-baseline", "description": "Baseline manifest/build evidence proves legacy-diag and core-agent are initially installed", "required": true, "expectedDomain": "build", "expectedClaimType": "observation" },
+    { "id": "S8-dependency", "description": "Current metadata proves legacy-diag is introduced by packagegroup RRECOMMENDS", "required": true, "expectedDomain": "metadata", "expectedClaimType": "diagnosis" },
+    { "id": "S8-decision", "description": "Packagegroup and image-scoped alternatives are compared and the lowest-impact solution is selected", "required": true },
+    { "id": "S8-review-image", "description": "Review, parse, and final image build pass with no solver errors or post-rootfs deletion", "required": true },
+    { "id": "S8-guest-absence", "description": "Guest evidence proves /usr/bin/legacy-diag is absent", "required": true, "expectedDomain": "guest", "expectedClaimType": "execution" },
+    { "id": "S8-guest-core", "description": "Guest core-agent --self-test still succeeds", "required": true, "expectedDomain": "guest", "expectedClaimType": "execution" },
+    { "id": "S8-incremental", "description": "A second ordinary image build proves task reuse", "required": true }
+  ],
+  "completion": {
+    "requiredJobs": [
+      { "id": "baseline", "kind": "bitbake", "purpose": "baseline", "target": "validation-remove-image", "allowedStatuses": ["SUCCEEDED"] },
+      { "id": "parse", "kind": "check", "purpose": "parse" },
+      { "id": "image", "kind": "bitbake", "purpose": "verification", "target": "validation-remove-image" },
+      { "id": "incremental", "kind": "bitbake", "purpose": "incremental-confirmation", "target": "validation-remove-image" },
+      { "id": "qemu", "kind": "qemu", "purpose": "qemu", "allowedStatuses": ["STOPPED"] }
+    ],
+    "requireReview": true,
+    "requireNoActiveJobs": true,
+    "requireNonzeroLogOffsets": true,
+    "requireJobIdentitySnapshots": true,
+    "requireDecisionAnalysis": true
+  }
+}

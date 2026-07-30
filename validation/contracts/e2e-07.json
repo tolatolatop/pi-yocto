@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "e2e-07-package-optimization-v1",
+  "requirements": [
+    { "id": "S7-baseline", "description": "Current metadata/build evidence proves optimize-probe uses default speed optimization before the change", "required": true, "expectedDomain": "build", "expectedClaimType": "diagnosis" },
+    { "id": "S7-decision-scope", "description": "Global and recipe-scope alternatives are compared and the target-only bbappend is selected", "required": true },
+    { "id": "S7-effective-flags", "description": "Post-change metadata and compile evidence proves one effective -Os and no conflicting -O2", "required": true, "expectedDomain": "metadata", "expectedClaimType": "configuration" },
+    { "id": "S7-review-build", "description": "Review, parse, package, and image builds succeed without changing global flags", "required": true },
+    { "id": "S7-guest", "description": "Guest optimize-probe --mode prints optimization=size and exits 0", "required": true, "expectedDomain": "guest", "expectedClaimType": "execution" },
+    { "id": "S7-incremental", "description": "A second ordinary image build proves target and unrelated task reuse", "required": true }
+  ],
+  "completion": {
+    "requiredJobs": [
+      { "id": "baseline", "kind": "bitbake", "purpose": "baseline", "target": "optimize-probe", "allowedStatuses": ["SUCCEEDED"] },
+      { "id": "parse", "kind": "check", "purpose": "parse" },
+      { "id": "recipe", "kind": "bitbake", "purpose": "verification", "target": "optimize-probe" },
+      { "id": "image", "kind": "bitbake", "purpose": "verification", "target": "validation-opt-image" },
+      { "id": "incremental", "kind": "bitbake", "purpose": "incremental-confirmation", "target": "validation-opt-image" },
+      { "id": "qemu", "kind": "qemu", "purpose": "qemu", "allowedStatuses": ["STOPPED"] }
+    ],
+    "requireReview": true,
+    "requireNoActiveJobs": true,
+    "requireNonzeroLogOffsets": true,
+    "requireJobIdentitySnapshots": true,
+    "requireDecisionAnalysis": true
+  }
+}

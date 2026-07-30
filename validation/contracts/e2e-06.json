@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "e2e-06-new-oss-recipe-v1",
+  "requirements": [
+    { "id": "S6-workspace-absence", "description": "Workspace and recipe evidence proves edgeprobe is absent from active layers before implementation", "required": true, "expectedDomain": "metadata", "expectedClaimType": "observation" },
+    { "id": "S6-recipe-license", "description": "The new recipe consumes every fixed input and has correct license, source, compile, install, and package metadata", "required": true, "expectedDomain": "source", "expectedClaimType": "configuration" },
+    { "id": "S6-review-parse", "description": "Static review and global parse pass without adding a third-party layer", "required": true },
+    { "id": "S6-package-image", "description": "Standalone edgeprobe and validation-oss-image builds succeed offline with package and image artifacts", "required": true, "expectedDomain": "build", "expectedClaimType": "build" },
+    { "id": "S6-guest", "description": "Guest edgeprobe --self-test prints edgeprobe: ok and exits 0", "required": true, "expectedDomain": "guest", "expectedClaimType": "execution" },
+    { "id": "S6-incremental", "description": "A second ordinary validation-oss-image build proves task/signature reuse", "required": true }
+  ],
+  "completion": {
+    "requiredJobs": [
+      { "id": "parse", "kind": "check", "purpose": "parse" },
+      { "id": "recipe", "kind": "bitbake", "purpose": "verification", "target": "edgeprobe" },
+      { "id": "image", "kind": "bitbake", "purpose": "verification", "target": "validation-oss-image" },
+      { "id": "incremental", "kind": "bitbake", "purpose": "incremental-confirmation", "target": "validation-oss-image" },
+      { "id": "qemu", "kind": "qemu", "purpose": "qemu", "allowedStatuses": ["STOPPED"] }
+    ],
+    "requireReview": true,
+    "requireNoActiveJobs": true,
+    "requireNonzeroLogOffsets": true,
+    "requireJobIdentitySnapshots": true
+  },
+  "inputs": [
+    { "id": "edgeprobe-source", "path": "attachments/edgeprobe.c", "sha256": "2c40b5a8efba75cdc90e91cfc099f523cec9e7ba307ee62c7196fa5375150a5f", "required": true, "purpose": "Audited edgeprobe 1.0 C source", "usage": "copy", "destinationSuffix": "/recipes-support/edgeprobe/files/edgeprobe.c" },
+    { "id": "edgeprobe-makefile", "path": "attachments/Makefile", "sha256": "d0e7652a0ca0d6bb9fdb82a3660b2691fb87380f322a444271763ebdf0e1a2e3", "required": true, "purpose": "Audited upstream Makefile", "usage": "copy", "destinationSuffix": "/recipes-support/edgeprobe/files/Makefile" },
+    { "id": "edgeprobe-license", "path": "attachments/LICENSE", "sha256": "ff0a74b0a8a1b38835146d1be7135f8ecb5e8a9d78505e0f385a8018b155fbf2", "required": true, "purpose": "Audited MIT license text", "usage": "copy", "destinationSuffix": "/recipes-support/edgeprobe/files/LICENSE" }
+  ]
+}
