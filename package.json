@@ -1,0 +1,61 @@
+{
+  "name": "pi-yocto",
+  "version": "0.1.0",
+  "description": "Offline-first Yocto/Poky agent harness for Pi",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "pi-yocto": "./dist/src/cli.js"
+  },
+  "files": [
+    "dist/src",
+    "agents",
+    "workflows",
+    "knowledge",
+    "validation",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "yocto",
+    "poky",
+    "bitbake"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/src/extension.js",
+      "./node_modules/pi-agents/src/index.ts"
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "check": "npm run test && npm pack --dry-run",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "commander": "14.0.0",
+    "minisearch": "7.1.2",
+    "pi-agents": "0.2.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.82.1",
+    "@types/node": "24.1.0",
+    "typebox": "1.1.31",
+    "typescript": "5.9.2"
+  }
+}
