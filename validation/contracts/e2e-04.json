@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "e2e-04-kernel-fragment-v2",
+  "requirements": [
+    { "id": "S4-baseline", "description": "Inspection distinguishes current linux-yocto 6.6, inactive 6.1 append, fragment, meta-local dummy config, and dirty runqemu", "required": true },
+    { "id": "S4-cause", "description": "Pre-fix show-appends and virtual/kernel metadata prove the fragment is inactive", "required": true },
+    { "id": "S4-active", "description": "Post-fix show-appends, SRC_URI, and config audit prove the fragment is consumed", "required": true },
+    { "id": "S4-kernel", "description": "A detached ordinary virtual/kernel build succeeds with kernel artifact/signature evidence", "required": true },
+    { "id": "S4-image", "description": "The matching validation image succeeds with kernel, rootfs, and qemuboot artifacts", "required": true },
+    { "id": "S4-guest", "description": "Guest /proc/config.gz contains CONFIG_IKCONFIG=y and CONFIG_IKCONFIG_PROC=y with exit 0", "required": true, "expectedDomain": "guest", "expectedClaimType": "execution" },
+    { "id": "S4-protection", "description": "Guest has no kernel panic; CONFIG_DUMMY=m, meta-local, Poky, and runqemu remain protected", "required": true }
+  ],
+  "completion": {
+    "requiredJobs": [
+      { "id": "kernel", "kind": "bitbake", "purpose": "verification", "target": "virtual/kernel" },
+      { "id": "image", "kind": "bitbake", "purpose": "verification", "target": "validation-ikconfig-image" },
+      { "id": "qemu", "kind": "qemu", "purpose": "qemu", "allowedStatuses": ["STOPPED"] }
+    ],
+    "requireReview": true,
+    "requireNoActiveJobs": true,
+    "requireNonzeroLogOffsets": true,
+    "requireJobIdentitySnapshots": true
+  }
+}

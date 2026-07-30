@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "e2e-01-patch-regression-v2",
+  "requirements": [
+    { "id": "S1-diagnosis", "description": "Current-run log.do_patch identifies sensor-reader:do_patch, the failing hunk/path, and the 2.0 source location", "required": true },
+    { "id": "S1-intent", "description": "The refreshed patch preserves the offline telemetry product behavior and has reviewable metadata", "required": true },
+    { "id": "S1-review", "description": "Persisted yocto_review and BitBake parse both pass", "required": true },
+    { "id": "S1-build", "description": "Detached offline sensor-reader build succeeds with RPM/package artifacts and behavior evidence", "required": true },
+    { "id": "S1-incremental", "description": "A second ordinary sensor-reader build proves signature/sstate or no-rerun reuse", "required": true },
+    { "id": "S1-protection", "description": "Poky, meta-local, shared caches, and pre-existing dirty content remain unchanged", "required": true }
+  ],
+  "completion": {
+    "requiredJobs": [
+      { "id": "parse", "kind": "check", "purpose": "parse" },
+      { "id": "recipe-build", "kind": "bitbake", "purpose": "verification", "target": "sensor-reader" },
+      { "id": "incremental", "kind": "bitbake", "purpose": "incremental-confirmation", "target": "sensor-reader" }
+    ],
+    "requireReview": true,
+    "requireNoActiveJobs": true,
+    "requireNonzeroLogOffsets": true,
+    "requireJobIdentitySnapshots": true
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "e2e-03-package-split-v2",
+  "requirements": [
+    { "id": "S3-root-cause", "description": "Current do_rootfs solver evidence distinguishes recipe, PN, PN-cli, and image install token", "required": true, "expectedDomain": "build", "expectedClaimType": "diagnosis" },
+    { "id": "S3-ownership", "description": "Current metadata proves which output package owns /usr/bin/field-console", "required": true, "expectedDomain": "metadata", "expectedClaimType": "configuration" },
+    { "id": "S3-decision", "description": "At least two alternatives are compared and the lowest product-impact solution is selected", "required": true },
+    { "id": "S3-review-build", "description": "Review, parse, standalone field-console build, and validation-field-image build succeed", "required": true },
+    { "id": "S3-artifact-guest", "description": "Manifest/rootfs ownership is correct and guest field-console --version returns 1.0 with exit 0", "required": true, "expectedDomain": "guest", "expectedClaimType": "execution" },
+    { "id": "S3-incremental", "description": "A second ordinary validation-field-image build proves no unrelated task reruns", "required": true }
+  ],
+  "completion": {
+    "requiredJobs": [
+      { "id": "baseline-rootfs", "kind": "bitbake", "purpose": "baseline", "target": "validation-field-image", "allowedStatuses": ["FAILED"] },
+      { "id": "parse", "kind": "check", "purpose": "parse" },
+      { "id": "recipe", "kind": "bitbake", "purpose": "verification", "target": "field-console" },
+      { "id": "image", "kind": "bitbake", "purpose": "verification", "target": "validation-field-image" },
+      { "id": "incremental", "kind": "bitbake", "purpose": "incremental-confirmation", "target": "validation-field-image" },
+      { "id": "qemu", "kind": "qemu", "purpose": "qemu", "allowedStatuses": ["STOPPED"] }
+    ],
+    "requireReview": true,
+    "requireNoActiveJobs": true,
+    "requireNonzeroLogOffsets": true,
+    "requireJobIdentitySnapshots": true,
+    "requireDecisionAnalysis": true
+  }
+}

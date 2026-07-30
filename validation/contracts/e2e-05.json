@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "e2e-05-offline-recovery-v2",
+  "requirements": [
+    { "id": "S5-failure", "description": "Current baseline do_fetch failure names the recipe, missing URI/DL object, and BB_NO_NETWORK=1 without network fallback", "required": true },
+    { "id": "S5-mirror", "description": "The local mirror archive SHA-256 matches the recipe and checksum validation remains enabled", "required": true },
+    { "id": "S5-config", "description": "An approved run-local file mirror config has metadata evidence for PREMIRRORS and BB_NO_NETWORK", "required": true },
+    { "id": "S5-recovery", "description": "A new Pi session resumes the same detached job identity and incrementally tails it without duplicate verification", "required": true },
+    { "id": "S5-artifacts", "description": "The offline image succeeds with download, package, manifest, rootfs, and image artifact evidence", "required": true },
+    { "id": "S5-incremental", "description": "A second ordinary image build reports sstate/signature reuse and no task reruns", "required": true }
+  ],
+  "completion": {
+    "requiredJobs": [
+      { "id": "baseline-fetch", "kind": "bitbake", "purpose": "baseline", "target": "offline-report-image", "allowedStatuses": ["FAILED"] },
+      { "id": "image", "kind": "bitbake", "purpose": "verification", "target": "offline-report-image" },
+      { "id": "incremental", "kind": "bitbake", "purpose": "incremental-confirmation", "target": "offline-report-image" }
+    ],
+    "requireNoActiveJobs": true,
+    "requireNonzeroLogOffsets": true,
+    "requireJobIdentitySnapshots": true,
+    "minimumSessionBindings": 2
+  }
+}

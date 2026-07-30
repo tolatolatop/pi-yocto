@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "e2e-02-create-layer-image-v2",
+  "requirements": [
+    { "id": "S2-input-plan", "description": "The exact plan consumes both controller-provided source and LICENSE inputs and covers every written path", "required": true },
+    { "id": "S2-layer", "description": "The new layer has unique collection/pattern/priority, scarthgap compatibility, and appears once in show-layers", "required": true },
+    { "id": "S2-review-parse", "description": "Recipe/image review and parse pass before the image build", "required": true },
+    { "id": "S2-image", "description": "The offline validation-health-image build succeeds with package, license, manifest, kernel, rootfs, and qemuboot artifacts", "required": true },
+    { "id": "S2-guest", "description": "Guest validation-health --self-test prints exactly validation-health: ok and exits 0", "required": true, "expectedDomain": "guest", "expectedClaimType": "execution" },
+    { "id": "S2-cleanup", "description": "The QEMU process group is stopped and protected workspaces remain unchanged", "required": true }
+  ],
+  "completion": {
+    "requiredJobs": [
+      { "id": "parse", "kind": "check", "purpose": "parse" },
+      { "id": "image", "kind": "bitbake", "purpose": "verification", "target": "validation-health-image" },
+      { "id": "qemu", "kind": "qemu", "purpose": "qemu", "allowedStatuses": ["STOPPED"] }
+    ],
+    "requireReview": true,
+    "requireNoActiveJobs": true,
+    "requireNonzeroLogOffsets": true,
+    "requireJobIdentitySnapshots": true
+  },
+  "inputs": [
+    { "id": "validation-health-source", "path": "attachments/validation-health", "sha256": "f2473ede0bf669ae6b016d0f048a3900072215c1e5a08d16234a21e941633e6f", "required": true, "purpose": "Approved application source", "usage": "copy", "destinationSuffix": "/files/validation-health" },
+    { "id": "validation-health-license", "path": "attachments/LICENSE", "sha256": "199eff9128851ecd4a76b11c0b30b8a1fd7c6e686a0056adc868a5c4f1797a3c", "required": true, "purpose": "Approved application license text", "usage": "copy", "destinationSuffix": "/files/LICENSE" }
+  ]
+}
