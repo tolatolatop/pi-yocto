@@ -30,5 +30,24 @@ test("Yocto review returns checkpointable source Evidence and rejects outside pa
   assert.equal(review.passed, true);
   assert.equal(review.evidence[0]?.executionDomain, "source");
   assert.equal(review.evidence[0]?.claimType, "diagnosis");
+  assert.equal(review.evidence.some((item) => item.executionDomain === "source" && item.claimType === "configuration"), true);
   await assert.rejects(() => reviewYoctoFiles(located, ["/etc/passwd"]), /outside the configured Poky workspace/);
+});
+
+test("Yocto review resolves mandatory fields inherited through a local require", async () => {
+  const located = await createTestWorkspace("pi-yocto-review-include-");
+  const recipeDir = join(located.layerDir, "recipes-test", "variant");
+  const include = join(recipeDir, "variant-common.inc");
+  const recipe = join(recipeDir, "variant-minimal_1.0.bb");
+  await mkdir(recipeDir, { recursive: true });
+  await writeFile(include, 'SUMMARY = "shared fields"\nLICENSE = "MIT"\nLIC_FILES_CHKSUM = "file://LICENSE;md5=00000000000000000000000000000000"\nSRC_URI = "file://variant.c"\n', "utf8");
+  await writeFile(recipe, "require variant-common.inc\nPACKAGECONFIG = \"\"\n", "utf8");
+  const review = await reviewYoctoFiles(located, [recipe]);
+  assert.equal(review.passed, true);
+  assert.equal(review.findings.some((finding) => finding.rule === "license"), false);
+
+  await writeFile(recipe, "require missing-common.inc\n", "utf8");
+  const missing = await reviewYoctoFiles(located, [recipe]);
+  assert.equal(missing.passed, false);
+  assert.equal(missing.findings.some((finding) => finding.rule === "required-include"), true);
 });

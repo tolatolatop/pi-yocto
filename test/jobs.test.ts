@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtemp } from "node:fs/promises";
 import { test } from "node:test";
 import { findConfig } from "../src/config.js";
 import { writeJsonAtomic } from "../src/fs-utils.js";
-import { JobStore, reconcileJob, startJob, stopJob, tailJob } from "../src/jobs.js";
+import { jobEvidenceVariants, JobStore, normalizeQemuArgs, reconcileJob, startJob, stopJob, tailJob } from "../src/jobs.js";
 import { readBootId, runCommand } from "../src/process.js";
 import { TaskStore } from "../src/state.js";
 import type { JobRecord, WorkspaceConfig } from "../src/types.js";
@@ -49,6 +49,13 @@ test("detached job survives launcher and is recovered from persisted identity/lo
   assert.match(tailed.text, /BB_NO_NETWORK=1/);
   assert.match(tailed.text, /args=smoke/);
   assert.match(tailed.text, /umask=0022/);
+  let persisted = await taskStore.load(task.id);
+  for (let attempt = 0; attempt < 20 && !persisted.evidence.some((item) => item.jobId === job.id); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    persisted = await taskStore.load(task.id);
+  }
+  assert.equal(persisted.evidence.some((item) => item.jobId === job.id && item.claimType === "build"), true);
+  assert.deepEqual(jobEvidenceVariants(current).map((item) => item.claimType), ["build", "observation", "diagnosis"]);
 });
 
 test("requested child umask is normalized without weakening the caller", async () => {
@@ -63,6 +70,31 @@ test("requested child umask is normalized without weakening the caller", async (
   } finally {
     process.umask(previous);
   }
+});
+
+test("baseline jobs can run before planning without opening the implementation phase", async () => {
+  const located = await fixture();
+  const tasks = new TaskStore(located);
+  let task = await tasks.create("measure baseline before designing a change");
+  task = await tasks.transition(task.id, "INSPECTING");
+  await tasks.checkpoint(task.id, { objective: task.objective, phase: "INSPECTING", modifiedFiles: [], evidenceIds: [], completedSteps: ["workspace inspected"], pendingSteps: ["baseline"], jobIds: [], logOffsets: {} });
+  const { job } = await startJob(located, { kind: "bitbake", purpose: "baseline", taskId: task.id, args: ["smoke"] });
+  assert.equal(job.purpose, "baseline");
+  assert.equal((await tasks.load(task.id)).phase, "INSPECTING");
+});
+
+test("QEMU image targets resolve to the current unique qemuboot configuration", async () => {
+  const located = await fixture();
+  const deploy = join(located.config.buildDir, "tmp", "deploy", "images", located.config.machine);
+  const dated = `validation-image-${located.config.machine}.rootfs-20260731010101.qemuboot.conf`;
+  const stable = `validation-image-${located.config.machine}.rootfs.qemuboot.conf`;
+  await mkdir(deploy, { recursive: true });
+  await writeFile(join(deploy, dated), "QB_SYSTEM_NAME = qemu-system-x86_64\n", "utf8");
+  await symlink(dated, join(deploy, stable));
+  assert.deepEqual(await normalizeQemuArgs(located, [located.config.machine, "validation-image"]), [join(deploy, stable), "nographic", "slirp"]);
+  assert.deepEqual(await normalizeQemuArgs(located, [join(deploy, stable), "slirp"]), [join(deploy, stable), "slirp", "nographic"]);
+  await assert.rejects(() => normalizeQemuArgs(located, ["missing-image"]), /candidates: none/);
+  await assert.rejects(() => normalizeQemuArgs(located, ["validation-image", "root"]), /accepts one image target/);
 });
 
 test("a rejected reservation leaves no fake failed job and can retry iteration one", async () => {

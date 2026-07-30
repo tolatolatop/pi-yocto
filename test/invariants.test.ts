@@ -19,6 +19,23 @@ test("one Pi session cannot silently switch to a different TaskRecord", async ()
   assert.equal(await contexts.active("session-one"), first.id);
 });
 
+test("trusted tool Evidence is atomically persisted and immediately usable", async () => {
+  const located = await createTestWorkspace("pi-yocto-evidence-ledger-");
+  const tasks = new TaskStore(located);
+  const task = await tasks.create("persist typed metadata evidence");
+  await tasks.setVerificationContract(task.id, [{ id: "metadata", description: "metadata query succeeded", required: true, expectedDomain: "metadata", expectedClaimType: "configuration" }]);
+  const evidence: Evidence = {
+    id: "ev-metadata-ledger", kind: "metadata", executionDomain: "metadata", claimType: "configuration",
+    source: "bitbake:environment", fact: "bitbake -e demo exited 0", confidence: "high", capturedAt: new Date().toISOString(),
+    command: ["bitbake", "-e", "demo"], exitCode: 0
+  };
+  await tasks.recordEvidence(task.id, [evidence]);
+  await tasks.recordEvidence(task.id, [evidence]);
+  const updated = await tasks.updateVerification(task.id, "metadata", "PASSED", [evidence.id]);
+  assert.equal(updated.evidence.filter((item) => item.id === evidence.id).length, 1);
+  assert.equal(updated.verificationContract?.requirements[0]?.status, "PASSED");
+});
+
 test("required guest verification rejects host evidence and gates COMPLETED", async () => {
   const located = await createTestWorkspace("pi-yocto-verification-");
   const store = new TaskStore(located);
