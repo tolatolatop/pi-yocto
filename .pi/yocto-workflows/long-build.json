@@ -1,0 +1,14 @@
+{
+  "label": "Persistent long Yocto build",
+  "flow": {
+    "kind": "sequence",
+    "steps": [
+      { "kind": "spawn", "agent": "workspace-inspector", "task": "Open the supplied TaskRecord, capture target/caches/disk/offline/dirty state, and checkpoint INSPECTING.", "scope": "project", "output": "json" },
+      { "kind": "spawn", "agent": "evidence-summarizer", "task": "Open the supplied TaskRecord, define the build/artifact verification contract, and checkpoint PLANNING then EXECUTING with the exact target and resume action.", "scope": "project", "output": "json" },
+      { "kind": "spawn", "agent": "verifier", "task": "Open the supplied TaskRecord. Start or reuse exactly one ordinary offline job with purpose=verification iteration=1, then immediately checkpoint job ID/log offset/resume commands. Do not hold a shell open or start a duplicate.", "scope": "project", "output": "json" },
+      { "kind": "spawn", "agent": "evidence-summarizer", "task": "Open the supplied TaskRecord. Report persisted job identity/status/log commands and recovery procedure. Complete only after terminal success Evidence satisfies the contract; otherwise PAUSED/FAILED.", "scope": "project", "output": "json" }
+    ]
+  },
+  "budgets": { "maxDepth": 4, "maxChildren": 8, "maxParallelism": 3, "maxIterations": 2 },
+  "scope": "project"
+}

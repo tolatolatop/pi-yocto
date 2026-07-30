@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "1.0.0",
+  "sourceDir": "/home/agent/poky/poky-src",
+  "buildDir": "/home/agent/poky/build-scarthgap-qemux86-64",
+  "machine": "qemux86-64",
+  "distro": "poky",
+  "layers": [
+    "/home/agent/poky/meta-local",
+    "/home/agent/poky/poky-src/meta",
+    "/home/agent/poky/poky-src/meta-poky",
+    "/home/agent/poky/poky-src/meta-yocto-bsp"
+  ],
+  "dlDir": "/home/agent/poky/cache/downloads",
+  "sstateDir": "/home/agent/poky/cache/sstate",
+  "offline": {
+    "bitbakeNoNetwork": true,
+    "blockExplicitNetworkCommands": true
+  },
+  "limits": {
+    "maxParallelAgents": 3,
+    "maxWorkflowDepth": 4,
+    "maxFixIterations": 2
+  }
+}

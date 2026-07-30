@@ -1,0 +1,60 @@
+{
+  "label": "Yocto evidence-first diagnosis",
+  "flow": {
+    "kind": "sequence",
+    "id": "diagnose-sequence",
+    "steps": [
+      {
+        "kind": "spawn",
+        "id": "inspect",
+        "agent": "workspace-inspector",
+        "task": "Open the supplied TaskRecord, inspect the workspace, and checkpoint INSPECTING. Return AgentResult JSON and do not modify anything.",
+        "scope": "project",
+        "output": "json"
+      },
+      {
+        "kind": "fork",
+        "id": "diagnostic-fork",
+        "concurrency": 3,
+        "branches": {
+          "logs": {
+            "kind": "spawn",
+            "agent": "log-analyst",
+            "task": "Open the supplied TaskRecord. Find the relevant failure log and first actionable error. Read-only; do not change the shared phase.",
+            "scope": "project",
+            "output": "json"
+          },
+          "metadata": {
+            "kind": "spawn",
+            "agent": "metadata-explorer",
+            "task": "Open the supplied TaskRecord. Investigate variables, active appends, tasks and dependencies. Read-only/offline; do not change the shared phase.",
+            "scope": "project",
+            "output": "json"
+          },
+          "standards": {
+            "kind": "spawn",
+            "agent": "standards-reviewer",
+            "task": "Open the supplied TaskRecord. Review relevant files for standards/reproducibility. Read-only; do not change the shared phase.",
+            "scope": "project",
+            "output": "json"
+          }
+        }
+      },
+      {
+        "kind": "join",
+        "id": "diagnostic-summary",
+        "from": "diagnostic-fork",
+        "mode": "all",
+        "onFailure": "collectErrors",
+        "reducer": {
+          "kind": "agent",
+          "agent": "evidence-summarizer",
+          "task": "Open the supplied TaskRecord. Merge branches, checkpoint their typed Evidence, define the verification contract, and checkpoint PLANNING with the root cause, exact next action and resume action. Do not claim a fix was executed.",
+          "output": "json"
+        }
+      }
+    ]
+  },
+  "budgets": { "maxDepth": 4, "maxChildren": 12, "maxParallelism": 3, "maxIterations": 2 },
+  "scope": "project"
+}

@@ -1,0 +1,24 @@
+{
+  "label": "Yocto build optimization",
+  "flow": {
+    "kind": "sequence",
+    "steps": [
+      { "kind": "spawn", "agent": "workspace-inspector", "task": "Open the supplied TaskRecord, capture exact target/machine/distro/concurrency/caches/dirty state, and checkpoint INSPECTING.", "scope": "project", "output": "json" },
+      {
+        "kind": "fork",
+        "id": "performance-fork",
+        "concurrency": 3,
+        "branches": {
+          "buildstats": { "kind": "spawn", "agent": "performance-analyst", "task": "Analyze buildstats and critical slow tasks without modifying the workspace.", "scope": "project", "output": "json" },
+          "signatures": { "kind": "spawn", "agent": "metadata-explorer", "task": "Analyze signature/rebuild evidence and relevant variable history. Read-only.", "scope": "project", "output": "json" },
+          "cache": { "kind": "spawn", "agent": "performance-analyst", "task": "Analyze sstate reuse, download availability, disk and scheduler evidence. Do not clean anything.", "scope": "project", "output": "json" }
+        }
+      },
+      { "kind": "join", "from": "performance-fork", "mode": "all", "onFailure": "collectErrors", "reducer": { "kind": "agent", "agent": "evidence-summarizer", "task": "Open the supplied TaskRecord. Merge baseline analyses, define like-for-like verification requirements, and checkpoint PLANNING with measurable changes requiring content-bound approval.", "output": "json" } },
+      { "kind": "spawn", "agent": "layer-engineer", "task": "Open the supplied TaskRecord. Prepare one exact ChangeSet and apply only after its content-bound approval; otherwise stop without editing.", "scope": "project", "output": "json" },
+      { "kind": "spawn", "agent": "verifier", "task": "Open the supplied TaskRecord. If approved changes were applied, checkpoint VERIFYING and repeat identical target/settings at the bounded iteration; record like-for-like Evidence. Otherwise start no job.", "scope": "project", "output": "json" }
+    ]
+  },
+  "budgets": { "maxDepth": 4, "maxChildren": 12, "maxParallelism": 3, "maxIterations": 2 },
+  "scope": "project"
+}

@@ -1,0 +1,37 @@
+{
+  "label": "Yocto approved fix and verification",
+  "flow": {
+    "kind": "sequence",
+    "id": "fix-sequence",
+    "steps": [
+      { "kind": "spawn", "agent": "workspace-inspector", "task": "Open the supplied TaskRecord, capture the protected dirty snapshot, and checkpoint INSPECTING. Read-only.", "scope": "project", "output": "json" },
+      {
+        "kind": "fork",
+        "id": "fix-diagnostic-fork",
+        "concurrency": 3,
+        "branches": {
+          "logs": { "kind": "spawn", "agent": "log-analyst", "task": "Open the supplied TaskRecord and find the first actionable failure. Read-only; do not change the shared phase.", "scope": "project", "output": "json" },
+          "metadata": { "kind": "spawn", "agent": "metadata-explorer", "task": "Open the supplied TaskRecord and prove relevant final metadata/append/task facts. Read-only; do not change the shared phase.", "scope": "project", "output": "json" },
+          "standards": { "kind": "spawn", "agent": "standards-reviewer", "task": "Open the supplied TaskRecord and inspect only implicated files. Read-only; do not change the shared phase.", "scope": "project", "output": "json" }
+        }
+      },
+      { "kind": "join", "from": "fix-diagnostic-fork", "mode": "all", "onFailure": "collectErrors", "reducer": { "kind": "agent", "agent": "evidence-summarizer", "task": "Open the supplied TaskRecord, merge diagnostic Evidence, define the immutable verification contract, and checkpoint PLANNING with an exact minimal fix plan. Do not approve unspecified content.", "output": "json" } },
+      {
+        "kind": "loop",
+        "id": "fix-loop",
+        "maxIterations": 2,
+        "continueWhen": { "kind": "result_field", "path": "done", "equals": false },
+        "body": {
+          "kind": "sequence",
+          "steps": [
+            { "kind": "spawn", "agent": "layer-engineer", "task": "Open the supplied TaskRecord. Prepare an immutable content-bound ChangeSet and apply only after exact human approval. For a repair after failed verification, checkpoint VERIFYING -> EXECUTING; if approval is unavailable, stop without edits.", "scope": "project", "output": "json" },
+            { "kind": "spawn", "agent": "verifier", "task": "Open the supplied TaskRecord. Checkpoint VERIFYING and use the current loop number as verification iteration 1 or 2. Record job/guest Evidence and return done=true only when the persisted contract passes.", "scope": "project", "output": "json" }
+          ]
+        }
+      },
+      { "kind": "spawn", "agent": "evidence-summarizer", "task": "Open the supplied TaskRecord. Reconcile the evidence ledger, ChangeSet, approvals, jobs and verification results. Checkpoint COMPLETED with finalSummary only if all requirements passed; otherwise FAILED/PAUSED with unresolved risks and resume action.", "scope": "project", "output": "json" }
+    ]
+  },
+  "budgets": { "maxDepth": 4, "maxChildren": 16, "maxParallelism": 3, "maxIterations": 2 },
+  "scope": "project"
+}
