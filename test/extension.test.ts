@@ -20,7 +20,7 @@ test("Pi extension registers the complete Poky tool and slash-command surface", 
   assert.deepEqual(tools.sort(), [
     "yocto_approval_request", "yocto_change_apply", "yocto_change_prepare", "yocto_checkpoint", "yocto_guest_exec",
     "yocto_job_start", "yocto_job_status", "yocto_job_stop", "yocto_job_tail", "yocto_knowledge_search", "yocto_log_analyze",
-    "yocto_metadata_query", "yocto_mirror_preflight", "yocto_review", "yocto_task_open", "yocto_task_status",
+    "yocto_metadata_query", "yocto_mirror_preflight", "yocto_native_cache_inspect", "yocto_review", "yocto_task_open", "yocto_task_status",
     "yocto_verification_plan", "yocto_verification_update", "yocto_workspace_inspect"
   ]);
   assert.ok(commands.includes("yocto-diagnose"));

@@ -35,6 +35,7 @@ agent definitions are never overwritten.
 ```text
 pi-yocto doctor [--json]
 pi-yocto knowledge build|status|search <query>
+pi-yocto cache native [--target autoconf-native] [--log <cooker-log>] [--sig <sigdata>]
 pi-yocto task create "build and verify core-image-minimal"
 pi-yocto job start --kind bitbake --purpose verification \
   --task <task-id> --iteration 1 -- core-image-minimal

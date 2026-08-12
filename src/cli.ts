@@ -8,6 +8,7 @@ import { ApprovalStore } from "./approval.js";
 import { guestCommandEvidence, queueGuestCommand, waitForGuestCommand } from "./guest.js";
 import { JobStore, reconcileJob, startJob, stopJob, tailJob } from "./jobs.js";
 import { buildKnowledgeIndex, knowledgeStatus, searchKnowledge } from "./knowledge.js";
+import { inspectNativeCache } from "./native-cache.js";
 import { exportTaskMarkdown, TaskStore } from "./state.js";
 
 const program = new Command();
@@ -43,6 +44,17 @@ knowledge.command("status").action(async () => { process.stdout.write(`${JSON.st
 knowledge.command("search").argument("<query>").option("--release <release>").option("--limit <number>", "maximum hits", "8").action(async (query: string, options: { release?: string; limit: string }) => {
   process.stdout.write(`${JSON.stringify(await searchKnowledge(await findConfig(), query, { ...(options.release ? { release: options.release } : {}), limit: Number(options.limit) }), null, 2)}\n`);
 });
+
+const cache = program.command("cache").description("Inspect native shared-state reuse and signature inputs");
+cache.command("native")
+  .option("--target <recipe>", "native recipe to inspect", "autoconf-native")
+  .option("--log <path>", "specific cooker log")
+  .option("--sig <path>", "specific sigdata/siginfo file")
+  .action(async (options: { target: string; log?: string; sig?: string }) => {
+    const result = await inspectNativeCache(await findConfig(), { target: options.target, ...(options.log ? { logPath: options.log } : {}), ...(options.sig ? { sigPath: options.sig } : {}) });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    if (result.findings.some((finding) => finding.severity === "error")) process.exitCode = 1;
+  });
 
 const job = program.command("job").description("Manage detached BitBake/QEMU/check jobs");
 job.command("start").requiredOption("--kind <kind>", "bitbake, qemu, or check").requiredOption("--purpose <purpose>", "baseline, parse, verification, incremental-confirmation, or qemu").requiredOption("--task <id>").option("--iteration <number>").option("--retry-interrupted").argument("[args...]").action(async (args: string[], options: { kind: string; purpose: string; task: string; iteration?: string; retryInterrupted?: boolean }) => {

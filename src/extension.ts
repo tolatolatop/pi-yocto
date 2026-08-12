@@ -11,6 +11,7 @@ import { buildKnowledgeIndex, searchKnowledge } from "./knowledge.js";
 import { analyzeLog } from "./log-analyzer.js";
 import { queryMetadata, type MetadataAction } from "./metadata.js";
 import { preflightFileMirror } from "./mirror.js";
+import { inspectNativeCache } from "./native-cache.js";
 import { classifyCommand, classifyFileWrite } from "./policy.js";
 import { reviewYoctoFiles } from "./review.js";
 import { TaskContextStore, TaskStore } from "./state.js";
@@ -141,6 +142,17 @@ export default function piYoctoExtension(pi: ExtensionAPI): void {
     parameters: Type.Object({ path: Type.Optional(Type.String()) }),
     async execute(_id, params, _signal, _update, ctx) {
       const located = await locate(ctx); const result = await analyzeLog(located, params.path);
+      await persistToolEvidence(located, ctx, result.evidence);
+      return textResult(result);
+    }
+  });
+
+  pi.registerTool({
+    name: "yocto_native_cache_inspect", label: "Inspect native sstate reuse",
+    description: "Read effective BitBake cache/signature configuration for a -native recipe, parse the newest cooker Sstate summary, inspect an available task signature for target-side architecture dependencies, and return evidence-backed findings. This is read-only and never cleans or forces tasks.",
+    parameters: Type.Object({ target: Type.Optional(Type.String()), logPath: Type.Optional(Type.String()), sigPath: Type.Optional(Type.String()) }),
+    async execute(_id, params, _signal, _update, ctx) {
+      const located = await locate(ctx); const result = await inspectNativeCache(located, params);
       await persistToolEvidence(located, ctx, result.evidence);
       return textResult(result);
     }
