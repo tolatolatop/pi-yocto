@@ -1,0 +1,11 @@
+diff --git a/meta/classes-recipe/native.bbclass b/meta/classes-recipe/native.bbclass
+index 8bc9cd6..c9d67f1 100644
+--- a/meta/classes-recipe/native.bbclass
++++ b/meta/classes-recipe/native.bbclass
+@@ -12,3 +12,6 @@ EXCLUDE_FROM_WORLD = "1"
+
+-PACKAGE_ARCH = "${BUILD_ARCH}"
++# Fault injection for pi-yocto E2E: this incorrectly keys native output by
++# the target machine. Native executables run on BUILD_ARCH and must remain
++# reusable when MACHINE changes.
++PACKAGE_ARCH = "${MACHINE_ARCH}"
