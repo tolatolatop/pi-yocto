@@ -15,6 +15,7 @@ import { inspectNativeCache } from "./native-cache.js";
 import { classifyCommand, classifyFileWrite } from "./policy.js";
 import { reviewYoctoFiles } from "./review.js";
 import { TaskContextStore, TaskStore } from "./state.js";
+import { captureTmuxPane, requireTmuxSession, sendTmuxKey, sendTmuxText, waitForTmuxOutput } from "./tmux.js";
 import type { Evidence, JobKind, JobPurpose, TaskPhase } from "./types.js";
 import { inspectWorkspace } from "./workspace.js";
 
@@ -66,6 +67,45 @@ async function consumeCommandApproval(located: LocatedConfig, taskId: string, ac
 
 export default function piYoctoExtension(pi: ExtensionAPI): void {
   const announcedJobs = new Set<string>();
+
+  pi.registerFlag?.("disable", { description: "Disable comma-separated tools (for example --disable bash)", type: "string" });
+  pi.registerFlag?.("tmux-session", { description: "Bind yocto_tmux to one pre-created tmux session", type: "string" });
+
+  const boundTmuxSession = (): string => {
+    const value = pi.getFlag("tmux-session");
+    if (typeof value !== "string" || !value.trim()) throw new Error("yocto_tmux requires --tmux-session <name>");
+    return value.trim();
+  };
+
+  pi.registerTool({
+    name: "yocto_tmux", label: "Operate bound tmux console",
+    description: "Operate only the pre-created tmux session bound by --tmux-session. Use status/capture to inspect it, send to type literal console text, key for a small control-key allowlist, and wait to poll captured output. This replaces native bash when launched with --disable bash.",
+    promptSnippet: "Operate the exact tmux console bound at agent launch: capture, send literal text, send an allowed key, or wait for output.",
+    promptGuidelines: ["Use yocto_tmux only for the session bound by --tmux-session. Capture before sending, wait for a unique completion marker, and never assume a command completed from send alone."],
+    executionMode: "sequential",
+    parameters: Type.Object({
+      action: Type.Union(["status", "capture", "send", "key", "wait"].map((value) => Type.Literal(value))),
+      text: Type.Optional(Type.String({ minLength: 1, maxLength: 16384 })),
+      submit: Type.Optional(Type.Boolean()), key: Type.Optional(Type.Union(["C-c", "C-d", "Enter", "Escape", "Tab", "Up", "Down", "Left", "Right"].map((value) => Type.Literal(value)))),
+      pattern: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })), regex: Type.Optional(Type.Boolean()), exactLine: Type.Optional(Type.Boolean()),
+      timeoutMs: Type.Optional(Type.Integer({ minimum: 100, maximum: 300000 })), lines: Type.Optional(Type.Integer({ minimum: 1, maximum: 2000 }))
+    }),
+    async execute(_id, params, signal) {
+      const session = boundTmuxSession();
+      if (params.action === "status") { await requireTmuxSession(session, signal); return textResult(await captureTmuxPane(session, params.lines ?? 50, signal)); }
+      if (params.action === "capture") return textResult(await captureTmuxPane(session, params.lines ?? 200, signal));
+      if (params.action === "send") {
+        if (!params.text) throw new Error("tmux send requires text");
+        return textResult(await sendTmuxText(session, params.text, params.submit ?? true, signal));
+      }
+      if (params.action === "key") {
+        if (!params.key) throw new Error("tmux key requires key");
+        return textResult(await sendTmuxKey(session, params.key, signal));
+      }
+      if (!params.pattern) throw new Error("tmux wait requires pattern");
+      return textResult(await waitForTmuxOutput(session, params.pattern, { ...(params.regex !== undefined ? { regex: params.regex } : {}), ...(params.exactLine !== undefined ? { exactLine: params.exactLine } : {}), ...(params.timeoutMs ? { timeoutMs: params.timeoutMs } : {}), ...(params.lines ? { lines: params.lines } : {}), ...(signal ? { signal } : {}) }));
+    }
+  });
 
   pi.registerTool({
     name: "yocto_task_open", label: "Open or resume Yocto task",
@@ -372,7 +412,12 @@ export default function piYoctoExtension(pi: ExtensionAPI): void {
       }
     } catch { /* project may not be initialized */ }
   };
-  pi.on("session_start", async (_event, ctx) => notifyCompleted(ctx));
+  pi.on("session_start", async (_event, ctx) => {
+    const disabled = String(pi.getFlag("disable") ?? "").split(",").map((item) => item.trim()).filter(Boolean);
+    if (disabled.length) pi.setActiveTools(pi.getActiveTools().filter((name) => !disabled.includes(name)));
+    if (typeof pi.getFlag("tmux-session") === "string") await requireTmuxSession(String(pi.getFlag("tmux-session")));
+    await notifyCompleted(ctx);
+  });
   pi.on("tool_execution_end", async (_event, ctx) => notifyCompleted(ctx));
   pi.on("before_agent_start", async (event, ctx) => {
     try {

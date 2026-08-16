@@ -101,6 +101,7 @@ fixture 本身不可用时记 `BLOCKED_FIXTURE`；provider/API 不可用时记
 9. [E2E-09：runtime 与开发包同时集成](scenarios/09-runtime-dev.md)
 10. [E2E-10：同一源码 full/minimal 双变体共存](scenarios/10-full-minimal-variants.md)
 11. [E2E-11：Native sstate 污染定位、修复与跨目标架构复用](native-cache-repair-e2e/README.md)
+12. [E2E-12：禁用原生 bash 后通过绑定 tmux 控制台完成任务](tmux-console-e2e/README.md)
 
 每次结果至少记录：scenario/run ID、provider/model、开始结束时间、Pi session、
 workflow/flow ID、TaskRecord ID、approval ID、JobRecord ID、变更 diff、关键 evidence、

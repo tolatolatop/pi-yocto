@@ -61,6 +61,20 @@ detached job start/status/tail/stop, controlled QEMU guest execution, checkpoint
 and approval tools. `pi-agents` provides the `agent` and `workflow` tools and
 persisted `/flow` views.
 
+For an already-created interactive console, bind the extension to one exact
+tmux session and remove Pi's native shell tool:
+
+```bash
+tmux new-session -d -s pi-yocto-console -c /path/to/project
+pi --extension /path/to/pi-yocto/dist/src/extension.js \
+  --tmux-session pi-yocto-console --disable bash
+```
+
+The resulting `yocto_tmux` tool can inspect pane status/output, type literal
+text, wait for literal or regular-expression output, and send a small
+allowlist of interactive keys such as `C-c`. The session name is fixed at
+agent launch; individual tool calls cannot retarget another tmux session.
+
 Run `/yocto-diagnose`, `/yocto-fix-and-verify`, `/yocto-create-layer`,
 `/yocto-optimize-build`, or `/yocto-long-build`. Read-only branches run with a
 maximum parallelism of three. Each Pi/subagent session binds to one persisted task
