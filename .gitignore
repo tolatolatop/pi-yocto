@@ -20,3 +20,5 @@ coverage/
 .pi/auth.json
 .pi/models.json
 .pi/sessions/
+validation/native-cache-e2e/
+validation/tmux-e2e-smoke/

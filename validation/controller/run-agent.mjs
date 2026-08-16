@@ -1,18 +1,34 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const runRoot = resolve(process.argv[2] ?? "");
 const scenario = process.argv[3];
+const mode = process.argv[4] ?? "initial";
 if (!runRoot.startsWith(join(repoRoot, ".pi-yocto", "validation") + "/")) throw new Error("runRoot must be an isolated validation directory");
-if (!/^(?:06|07|08|09|10)$/.test(scenario ?? "")) throw new Error("Usage: run-agent.mjs <run-root> <06|07|08|09|10>");
+if (!/^(?:01|02|03|04|05|06|07|08|09|10)$/.test(scenario ?? "") || !["initial", "resume"].includes(mode)) throw new Error("Usage: run-agent.mjs <run-root> <01..10> [initial|resume]");
 if (!process.env.YOCTO_E2E_API_KEY) throw new Error("YOCTO_E2E_API_KEY is required in the controller process environment");
 
+const provider = process.env.YOCTO_E2E_PROVIDER ?? "openrouter";
+const model = process.env.YOCTO_E2E_MODEL ?? "qwen/qwen3.6-35b-a3b";
+const apiBaseUrl = process.env.YOCTO_E2E_API_BASE_URL ?? (provider === "openrouter" ? "https://openrouter.ai/api/v1" : undefined);
+const thinking = process.env.YOCTO_E2E_THINKING ?? "medium";
+const tmuxSession = process.env.YOCTO_E2E_TMUX_SESSION;
+if (tmuxSession && !/^[A-Za-z0-9_.-]{1,64}$/.test(tmuxSession)) throw new Error(`Unsafe tmux session: ${tmuxSession}`);
+
 const scenarioText = await readFile(join(repoRoot, "validation", "scenarios", ({
+  "01": "01-patch-regression.md",
+  "02": "02-create-layer-image.md",
+  "03": "03-rootfs-package-split.md",
+  "04": "04-kernel-fragment-qemu.md",
+  "05": "05-offline-long-build.md",
   "06": "06-new-oss-recipe.md",
   "07": "07-package-optimization.md",
   "08": "08-remove-package.md",
@@ -24,24 +40,58 @@ if (!taskMatch) throw new Error(`Cannot extract agent task for E2E-${scenario}`)
 const task = taskMatch[1].split("\n").map((line) => line.replace(/^> ?/, "")).join("\n").trim();
 
 const controllerDir = join(runRoot, "controller");
-const sessionDir = join(controllerDir, "sessions");
+const sessionDir = join(controllerDir, `sessions-${mode}-${Date.now()}`);
 await mkdir(sessionDir, { recursive: true });
-const rpcLog = createWriteStream(join(controllerDir, "rpc.jsonl"), { flags: "a", mode: 0o600 });
-const stderrLog = createWriteStream(join(controllerDir, "pi.stderr.log"), { flags: "a", mode: 0o600 });
+const rpcLog = createWriteStream(join(controllerDir, `rpc-${mode}.jsonl`), { flags: "a", mode: 0o600 });
+const stderrLog = createWriteStream(join(controllerDir, `pi-${mode}.stderr.log`), { flags: "a", mode: 0o600 });
 const decisionLog = createWriteStream(join(controllerDir, "ui-decisions.jsonl"), { flags: "a", mode: 0o600 });
+const tmuxLog = tmuxSession ? join(controllerDir, `tmux-${mode}.log`) : undefined;
+if (tmuxSession) {
+  await writeFile(tmuxLog, "", { mode: 0o600 });
+  await execFileAsync("tmux", ["new-session", "-d", "-s", tmuxSession, "-c", runRoot, "-n", "console"]);
+  await execFileAsync("tmux", ["set-option", "-t", tmuxSession, "history-limit", "10000"]);
+  const quotedLog = `'${tmuxLog.replaceAll("'", `'\\''`)}'`;
+  await execFileAsync("tmux", ["pipe-pane", "-o", "-t", `${tmuxSession}:0.0`, `cat >> ${quotedLog}`]);
+}
+
+let agentDir;
+if (apiBaseUrl) {
+  agentDir = join(controllerDir, "agent-config");
+  await mkdir(agentDir, { recursive: true });
+  await writeFile(join(agentDir, "models.json"), `${JSON.stringify({
+    providers: {
+      [provider]: {
+        baseUrl: apiBaseUrl,
+        api: "openai-completions",
+        apiKey: "$YOCTO_E2E_API_KEY",
+        authHeader: true,
+        // Keep a conservative advertised context/output budget so Pi compacts
+        // before OpenRouter receives an oversized completion request.
+        models: [{ id: model, name: model, reasoning: true, contextWindow: 131072, maxTokens: 16384 }]
+      }
+    }
+  }, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(join(agentDir, "auth.json"), "{}\n", { mode: 0o600 });
+}
 
 const pi = spawn(join(repoRoot, "node_modules", ".bin", "pi"), [
   "--mode", "rpc",
-  "--provider", "yocto-e2e",
-  "--model", "deepseek-v4-flash",
-  "--thinking", "medium",
+  "--provider", provider,
+  "--model", model,
+  "--thinking", thinking,
   "--offline",
   "--approve",
   "--session-dir", sessionDir,
-  "--extension", join(repoRoot, "dist", "src", "extension.js")
+  "--extension", join(repoRoot, "dist", "src", "extension.js"),
+  ...(tmuxSession ? ["--disable", "bash", "--tmux-session", tmuxSession] : [])
 ], {
   cwd: runRoot,
-  env: { ...process.env, PI_OFFLINE: "1" },
+  env: {
+    ...process.env,
+    PI_OFFLINE: "1",
+    OPENROUTER_API_KEY: process.env.YOCTO_E2E_API_KEY,
+    ...(agentDir ? { PI_CODING_AGENT_DIR: agentDir } : {})
+  },
   stdio: ["pipe", "pipe", "pipe"],
   shell: false
 });
@@ -97,20 +147,40 @@ async function finish(reason, code = 0) {
   if (finished) return;
   finished = true;
   const record = await loadTask();
-  await writeFile(join(controllerDir, "controller-result.json"), `${JSON.stringify({
+  await writeFile(join(controllerDir, `controller-result-${mode}.json`), `${JSON.stringify({
     scenario: `E2E-${scenario}`,
+    provider,
+    model,
+    mode,
     startedAt,
     completedAt: new Date().toISOString(),
     reason,
     settledCount,
     turnCount,
+    tmuxSession,
+    tmuxLog,
     taskId: record?.id,
     phase: record?.phase,
     lastAssistantText
   }, null, 2)}\n`, { mode: 0o600 });
   pi.kill("SIGTERM");
+  if (tmuxSession) {
+    const { stdout } = await execFileAsync("tmux", ["capture-pane", "-p", "-J", "-S", "-10000", "-t", `${tmuxSession}:0.0`]);
+    await writeFile(join(controllerDir, `tmux-${mode}.pane.log`), stdout, { mode: 0o600 });
+    await execFileAsync("tmux", ["pipe-pane", "-t", `${tmuxSession}:0.0`]);
+  }
   setTimeout(() => pi.kill("SIGKILL"), 2000).unref();
   process.exitCode = code;
+}
+
+async function shouldDetachForRecovery(record) {
+  if (scenario !== "05" || mode !== "initial" || !record?.jobIds?.length) return false;
+  const jobs = await Promise.all(record.jobIds.map(async (id) => JSON.parse(await readFile(join(runRoot, ".pi-yocto", "jobs", `${id}.json`), "utf8"))));
+  const verification = [...jobs].reverse().find((job) => job.kind === "bitbake" && job.purpose === "verification" && job.args.includes("offline-report-image") && ["QUEUED", "RUNNING"].includes(job.status));
+  if (!verification) return false;
+  const checkpoint = record.checkpoints?.at(-1);
+  const snapshot = checkpoint?.jobSnapshots?.[verification.id];
+  return checkpoint?.jobIds?.includes(verification.id) && Boolean(snapshot?.pid && snapshot?.processGroupId && snapshot?.processStartTicks && snapshot?.bootId);
 }
 
 async function handle(event) {
@@ -136,6 +206,8 @@ async function handle(event) {
   if (event.type === "tool_execution_end") {
     const record = await loadTask();
     if (record?.phase === "COMPLETED") return finish("task-completed", 0);
+    if (["FAILED", "PAUSED"].includes(record?.phase)) return finish(`task-${record.phase.toLowerCase()}`, 2);
+    if (await shouldDetachForRecovery(record)) return finish("detached-after-running-checkpoint", 0);
   }
   if (event.type === "turn_end") {
     turnCount += 1;
@@ -146,13 +218,14 @@ async function handle(event) {
   const record = await loadTask();
   if (record?.phase === "COMPLETED") return finish("task-completed", 0);
   if (["FAILED", "PAUSED"].includes(record?.phase)) return finish(`task-${record.phase.toLowerCase()}`, 2);
-  if (settledCount >= 8) return finish("settled-turn-budget-exhausted", 3);
+  if (settledCount >= 12) return finish("settled-turn-budget-exhausted", 3);
   const activeJobs = record?.jobIds?.length
     ? await Promise.all(record.jobIds.map(async (id) => JSON.parse(await readFile(join(runRoot, ".pi-yocto", "jobs", `${id}.json`), "utf8"))))
     : [];
   const active = activeJobs.filter((job) => ["QUEUED", "RUNNING", "STOPPING"].includes(job.status));
+  const activeQemu = active.filter((job) => job.kind === "qemu");
   const follow = record
-    ? `继续完成同一个 TaskRecord ${record.id}。当前 phase=${record.phase}，active jobs=${active.map((job) => `${job.id}:${job.status}`).join(",") || "none"}。检查合同中仍为 PENDING 的项目，恢复或轮询已有 job，不要重复高成本构建；完成所有证据、QEMU 停止和最终 checkpoint。`
+    ? `继续完成同一个 TaskRecord ${record.id}。当前 phase=${record.phase}，active jobs=${active.map((job) => `${job.id}:${job.status}`).join(",") || "none"}。${activeQemu.length ? `QEMU 验证完成后直接调用 yocto_job_stop，参数 id=${activeQemu[0].id} 且不传 approvalId；禁止先调用 yocto_approval_request。` : ""}检查合同中仍为 PENDING 的项目，恢复或轮询已有 job，不要重复高成本构建；成功 image 的包存在/缺失语义使用 yocto_artifact_assert，失败时受控 replan，不要把 TaskRecord 直接设为 FAILED；完成所有证据、QEMU 停止和最终 checkpoint。`
     : "你尚未创建 TaskRecord。请立即调用 yocto_task_open，并完整执行用户任务和控制器合同。";
   setTimeout(() => send({ id: `continue-${settledCount}`, type: "prompt", message: follow }), active.length ? 5000 : 1000);
 }
@@ -176,9 +249,13 @@ pi.on("exit", (code, signal) => {
   rpcLog.end(); stderrLog.end(); decisionLog.end();
 });
 
+const existing = mode === "resume" ? await loadTask() : undefined;
+if (mode === "resume" && !existing) throw new Error("Cannot resume because the run has no TaskRecord");
 setTimeout(() => send({
-  id: "initial-task",
+  id: `${mode}-task`,
   type: "prompt",
-  message: `${task}\n\n这是一次受控 E2E 验证。请自主完成闭环，使用 pi-yocto 专用工具和控制器固定合同；需要修改时准备完整 ChangeSet，控制器只会批准隔离 run 内的精确变更。不要要求我提供 oracle。`
+  message: mode === "initial"
+    ? `${task}\n\n这是一次受控 E2E 验证。请自主完成闭环，使用 pi-yocto 专用工具和控制器固定合同；需要修改时准备完整 ChangeSet，控制器只会批准隔离 run 内的精确变更。不要要求我提供 oracle。${tmuxSession ? ` 原生 bash 工具已禁用；需要操作终端时只能使用绑定到 ${tmuxSession} 的 yocto_tmux。` : ""}`
+    : `这是新的 Pi 会话。恢复同一 TaskRecord ${existing.id}，先调用 yocto_task_open 并显式传 taskId=${existing.id}，读取 checkpoint、已有 JobRecord 和增量日志 offset；不得重复已经运行或成功的高成本构建。继续完成原始任务：\n\n${task}\n\n完成所有合同证据、QEMU 安全停止和最终 checkpoint。`
 }), 500);
 setTimeout(() => { void finish("controller-timeout", 5); }, 45 * 60 * 1000).unref();
