@@ -1,7 +1,8 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import type { LocatedConfig } from "./config.js";
 import { pathExists, sha256 } from "./fs-utils.js";
+import { runCommand } from "./process.js";
 import type { Evidence } from "./types.js";
 
 export interface ReviewFinding {
@@ -67,6 +68,100 @@ async function effectiveRecipeContent(located: LocatedConfig, file: string, cont
   return chunks.join("\n");
 }
 
+function logicalStatements(content: string): string[] {
+  return content.replace(/\\\r?\n/g, " ").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function quotedTokens(statement: string): string[] {
+  return [...statement.matchAll(/["']([^"']*)["']/g)].flatMap((match) => (match[1] ?? "").split(/\s+/)).filter((token) => /^[A-Za-z0-9][A-Za-z0-9+_.@-]*$/.test(token));
+}
+
+async function packageDependencyKinds(located: LocatedConfig, packageName: string): Promise<Array<"RDEPENDS" | "RRECOMMENDS">> {
+  const escaped = packageName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const kinds = new Set<"RDEPENDS" | "RRECOMMENDS">();
+  const inspectLine = (line: string): void => {
+    if (/\bRRECOMMENDS(?:[:_]|\s*=)/.test(line)) kinds.add("RRECOMMENDS");
+    if (/\bRDEPENDS(?:[:_]|\s*=)/.test(line)) kinds.add("RDEPENDS");
+  };
+  try {
+    const result = await runCommand("rg", ["--files-with-matches", "-g", "*.bb", "-g", "*.bbappend", "-g", "*.inc", escaped, located.config.sourceDir, ...located.config.layers], {
+      cwd: located.rootDir,
+      timeoutMs: 20_000,
+      maxOutputBytes: 2 * 1024 * 1024
+    });
+    if ([0, 1].includes(result.code)) {
+      for (const path of [...new Set(result.stdout.split(/\r?\n/).filter(Boolean))]) {
+        const content = await readFile(path, "utf8").catch(() => "");
+        for (const statement of logicalStatements(content).filter((line) => line.includes(packageName))) inspectLine(statement);
+      }
+      return [...kinds];
+    }
+  } catch { /* fall back to a dependency-free workspace walk */ }
+
+  const pending = [...new Set([located.config.sourceDir, ...located.config.layers].map((root) => resolve(root)))];
+  let inspected = 0;
+  while (pending.length && inspected < 50_000 && kinds.size < 2) {
+    const directory = pending.pop() as string;
+    for (const entry of await readdir(directory, { withFileTypes: true }).catch(() => [])) {
+      if ([".git", ".pi-yocto", "tmp", "sstate-cache", "downloads"].includes(entry.name)) continue;
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(path);
+      else if (entry.isFile() && [".bb", ".bbappend", ".inc"].some((suffix) => entry.name.endsWith(suffix))) {
+        inspected += 1;
+        const content = await readFile(path, "utf8").catch(() => "");
+        if (content.includes(packageName)) for (const statement of logicalStatements(content).filter((line) => line.includes(packageName))) inspectLine(statement);
+      }
+    }
+  }
+  return [...kinds];
+}
+
+/** Semantic checks that are deterministic without running BitBake. */
+export async function semanticMetadataFindings(located: LocatedConfig, file: string, content: string, effectiveContent = content): Promise<ReviewFinding[]> {
+  const findings: ReviewFinding[] = [];
+  const statements = logicalStatements(effectiveContent);
+  for (const statement of statements.filter((line) => /^LIC_FILES_CHKSUM\s*(?:\?|\+|:)?=/.test(line))) {
+    if (/;sha256(?:sum)?=/i.test(statement)) findings.push({ severity: "error", rule: "license-checksum-algorithm", file, message: "LIC_FILES_CHKSUM requires md5=<32 hex>; SHA-256 belongs on SRC_URI, not the license entry" });
+    for (const match of statement.matchAll(/;md5=([^;"'\s]+)/gi)) {
+      const value = match[1] ?? "";
+      if (!/^[a-f0-9]{32}$/i.test(value) && !/^\$\{[^}]+\}$/.test(value)) findings.push({ severity: "error", rule: "license-checksum-format", file, message: `LIC_FILES_CHKSUM md5 value must contain exactly 32 hex digits, got '${value}'` });
+    }
+  }
+
+  const imageRecipe = extname(file) === ".bb" && /(?:^|\/)images\/[^/]+\.bb$/.test(file);
+  if (imageRecipe && !/^\s*(?:inherit\s+[^\n]*(?:core-image|image)|(?:require|include)\s+\S*image\S*\.bb)\b/m.test(effectiveContent)) {
+    findings.push({ severity: "error", rule: "image-task-graph", file, message: "Image recipe does not inherit an image class or require/include a base image recipe, so do_rootfs/do_image tasks will be missing" });
+  }
+
+  for (const statement of statements.filter((line) => /^IMAGE_RRECOMMENDS(?::[^\s=]+)*\s*(?::remove\s*)?=/.test(line))) {
+    findings.push({ severity: "error", rule: "package-removal-ineffective-variable", file, message: `IMAGE_RRECOMMENDS is not a standard image solver input and '${statement}' will not suppress a packagegroup recommendation; use image-scoped BAD_RECOMMENDATIONS after proving the edge is RRECOMMENDS` });
+  }
+
+  for (const statement of logicalStatements(content).filter((line) => /^IMAGE_INSTALL(?::[^\s=]+)*:remove\s*=/.test(line))) {
+    for (const packageName of quotedTokens(statement)) {
+      const kinds = await packageDependencyKinds(located, packageName);
+      if (kinds.includes("RDEPENDS")) findings.push({ severity: "error", rule: "package-removal-hard-dependency", file, message: `${packageName} is introduced by RDEPENDS; IMAGE_INSTALL:remove cannot remove a hard runtime dependency—change the owning package/packagegroup dependency instead` });
+      else if (kinds.includes("RRECOMMENDS")) findings.push({ severity: "error", rule: "package-removal-recommendation", file, message: `${packageName} is introduced by RRECOMMENDS; use BAD_RECOMMENDATIONS for this image instead of IMAGE_INSTALL:remove` });
+    }
+  }
+  if (file.endsWith(".bbappend")) {
+    const pn = file.split("/").at(-1)?.replace(/\.bbappend$/, "").split("_")[0] ?? "";
+    const flagStatements = statements.map((statement) => ({ statement, match: statement.match(/^(CFLAGS|TARGET_CFLAGS)((?::[^\s=]+)*)\s*(?:\?\?=|\?=|\+=|=\+|:=|=)/) })).filter((item) => item.match);
+    for (const { statement, match } of flagStatements) {
+      const variable = match?.[1] ?? "";
+      const suffixes = (match?.[2] ?? "").split(":").filter(Boolean);
+      if (!/-O(?:0|1|2|3|s|z|g|fast)\b/.test(statement)) continue;
+      if (variable === "CFLAGS") findings.push({ severity: "error", rule: "optimization-effective-variable", file, message: "Recipe optimization must change TARGET_CFLAGS, because CFLAGS is exported from ${TARGET_CFLAGS}; verify the final bitbake -e value" });
+      const overrides = suffixes.filter((suffix) => !["append", "prepend", "remove"].includes(suffix));
+      if (overrides.length && overrides.some((override) => override !== `pn-${pn}`)) findings.push({ severity: "error", rule: "optimization-override", file, message: `Optimization override must be recipe-scoped as pn-${pn} (or omitted inside this bbappend), got ${overrides.join(", ")}` });
+    }
+    const appendsOptimization = flagStatements.some(({ statement }) => /TARGET_CFLAGS(?::[^\s=]+)*:append[^=]*=.*-O(?:0|1|2|3|s|z|g|fast)\b/.test(statement));
+    const removesOptimization = flagStatements.some(({ statement }) => /TARGET_CFLAGS(?::[^\s=]+)*:remove[^=]*=.*-O(?:0|1|2|3|s|z|g|fast)\b/.test(statement));
+    if (appendsOptimization && !removesOptimization) findings.push({ severity: "error", rule: "optimization-conflict", file, message: "Appending an optimization level requires removing the inherited level from TARGET_CFLAGS so compile argv has exactly one -O flag" });
+  }
+  return findings;
+}
+
 export async function reviewYoctoFiles(located: LocatedConfig, files: string[]): Promise<{ findings: ReviewFinding[]; passed: boolean; evidence: Evidence[] }> {
   const findings: ReviewFinding[] = [];
   const evidence: Evidence[] = [];
@@ -83,6 +178,7 @@ export async function reviewYoctoFiles(located: LocatedConfig, files: string[]):
       if (/^SRC_URI.*(?:https?|git):\/\//m.test(effectiveContent) && !/SRC_URI\[[^\]]*(?:sha256sum|md5sum)\]/m.test(effectiveContent) && !/SRCREV\s*=/m.test(effectiveContent)) {
         findings.push({ severity: "warning", rule: "source-pinning", file, message: "Remote source does not appear checksum- or revision-pinned" });
       }
+      findings.push(...await semanticMetadataFindings(located, file, content, effectiveContent));
     }
     for (const match of content.matchAll(/^([A-Z][A-Z0-9_]*)_(append|prepend|remove)(?::|\s*=)/gm)) {
       findings.push({ severity: "warning", rule: "override-syntax", file, line: lineOf(content, match.index), message: `Legacy override syntax '${match[0].trim()}' should use ':' on scarthgap` });

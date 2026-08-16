@@ -88,3 +88,25 @@ test("job fingerprints deduplicate recovery and fix iterations are enforced per 
   assert.equal(confirmation.reused, false);
   await assert.rejects(() => startJob(located, { kind: "bitbake", purpose: "verification", taskId: task.id, iteration: 3, args: ["demo"] }), /between 1 and 2/);
 });
+
+test("a failed verification cannot be repeated with unchanged ChangeSet inputs", async () => {
+  const located = await createTestWorkspace("pi-yocto-unchanged-retry-");
+  await writeExecutable(join(located.config.sourceDir, "oe-init-build-env"), `export PATH="${located.binDir}:$PATH"\ncd "$1"\n`);
+  await writeExecutable(join(located.binDir, "bitbake"), "#!/usr/bin/env bash\necho deterministic failure\nexit 1\n");
+  const task = await enterExecutablePhase(located, "reject identical retries", "VERIFYING");
+  const first = await startJob(located, { kind: "bitbake", purpose: "verification", taskId: task.id, iteration: 1, args: ["demo"] });
+  const jobs = new JobStore(located);
+  let current = first.job;
+  const tasks = new TaskStore(located);
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    current = await reconcileJob(jobs, first.job.id);
+    const persisted = await tasks.load(task.id);
+    if (current.status === "FAILED" && persisted.verificationAttempts[0]?.status === "FAILED") break;
+  }
+  assert.equal(current.status, "FAILED");
+  await assert.rejects(
+    () => startJob(located, { kind: "bitbake", purpose: "verification", taskId: task.id, iteration: 2, args: ["demo"] }),
+    /input is unchanged/
+  );
+});

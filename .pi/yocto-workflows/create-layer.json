@@ -5,17 +5,17 @@
     "steps": [
       { "kind": "spawn", "agent": "workspace-inspector", "task": "Open the supplied TaskRecord, validate release/target/destination, and checkpoint INSPECTING. Read-only.", "scope": "project", "output": "json" },
       { "kind": "spawn", "agent": "evidence-summarizer", "task": "Open the supplied TaskRecord, define parse/build/artifact and any guest requirements, then checkpoint PLANNING with an exact file plan. Do not approve unspecified content.", "scope": "project", "output": "json" },
-      { "kind": "spawn", "agent": "layer-engineer", "task": "Open the supplied TaskRecord and prepare one content-bound ChangeSet. Apply only after exact human approval; otherwise stop without writing. Checkpoint the applied diff.", "scope": "project", "output": "json" },
+      { "kind": "spawn", "agent": "layer-engineer", "task": "Open the supplied TaskRecord and prepare one content-bound ChangeSet containing layer.conf, BBLAYERS registration, recipes/images, and every recipe-local files/ input. Resolve every graph-preflight issue before approval. Apply only after exact human approval; otherwise stop without writing. Checkpoint the applied diff.", "scope": "project", "output": "json" },
       {
         "kind": "fork",
         "id": "layer-review-fork",
         "concurrency": 2,
         "branches": {
           "standards": { "kind": "spawn", "agent": "standards-reviewer", "task": "Open the supplied TaskRecord and review the exact applied ChangeSet against scarthgap standards. If nothing was approved/applied, report PAUSED.", "scope": "project", "output": "json" },
-          "parse": { "kind": "spawn", "agent": "verifier", "task": "Open the supplied TaskRecord. If a ChangeSet was applied, checkpoint VERIFYING, parse, run iteration-1 target build, inspect artifacts and execute required guest behavior. Otherwise stop without jobs.", "scope": "project", "output": "json" }
+          "parse": { "kind": "spawn", "agent": "verifier", "task": "Open the supplied TaskRecord. If a ChangeSet was applied, checkpoint VERIFYING, consume its verificationReadiness list, parse before the iteration-1 target build, inspect target-bound artifacts and execute required guest behavior. Otherwise stop without jobs.", "scope": "project", "output": "json" }
         }
       },
-      { "kind": "join", "from": "layer-review-fork", "mode": "all", "onFailure": "collectErrors", "reducer": { "kind": "agent", "agent": "evidence-summarizer", "task": "Open the supplied TaskRecord. Merge review/verification Evidence, update each requirement, and checkpoint COMPLETED with finalSummary only if all required items passed; otherwise PAUSED/FAILED with resume action.", "output": "json" } }
+      { "kind": "join", "from": "layer-review-fork", "mode": "all", "onFailure": "collectErrors", "reducer": { "kind": "agent", "agent": "evidence-summarizer", "task": "Open the supplied TaskRecord. Merge review/verification Evidence, update each requirement, call yocto_completion_status, and use yocto_task_finalize only if all required items passed; otherwise checkpoint PAUSED when resumable and use terminal FAILED only when no legal recovery remains.", "output": "json" } }
     ]
   },
   "budgets": { "maxDepth": 4, "maxChildren": 12, "maxParallelism": 3, "maxIterations": 2 },

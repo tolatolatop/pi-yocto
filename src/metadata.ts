@@ -1,5 +1,6 @@
 import type { LocatedConfig } from "./config.js";
-import { sha256 } from "./fs-utils.js";
+import { join } from "node:path";
+import { sha256, writeTextAtomic } from "./fs-utils.js";
 import { captureBitbakeEnvironment, runCommand } from "./process.js";
 import type { Evidence } from "./types.js";
 
@@ -53,6 +54,14 @@ export async function queryMetadata(located: LocatedConfig, request: { action: M
     umask: 0o022
   });
   const output = request.action === "environment" ? extractVariable(result.stdout, request.variable) : result.stdout;
+  let returnedOutput = output;
+  let outputArtifact: string | undefined;
+  if (Buffer.byteLength(output) > 64 * 1024) {
+    const hash = sha256(output);
+    outputArtifact = join(located.stateDir, "metadata", `${request.action}-${hash.slice(0, 20)}.txt`);
+    await writeTextAtomic(outputArtifact, output);
+    returnedOutput = `${output.slice(0, 16 * 1024)}\n[...large metadata output stored at ${outputArtifact}; sha256=${hash}...]\n${output.slice(-16 * 1024)}`;
+  }
   const capturedAt = new Date().toISOString();
   const outputHash = sha256(`${output}\n${result.stderr}`);
   const claimTypes: Evidence["claimType"][] = request.action === "parse"
@@ -79,7 +88,8 @@ export async function queryMetadata(located: LocatedConfig, request: { action: M
     exitCode: result.code,
     durationMs: result.durationMs,
     timedOut: result.timedOut,
-    output: output.slice(-2_000_000),
+    output: returnedOutput,
+    ...(outputArtifact ? { outputArtifact, outputTruncated: true } : {}),
     stderr: result.stderr.slice(-100_000)
     ,evidence
   };

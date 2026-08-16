@@ -124,3 +124,57 @@ export function guestCommandEvidence(record: GuestCommandRecord): Evidence {
     jobId: record.jobId
   };
 }
+
+export type GuestAssertionInput =
+  | { kind: "file-exists" | "file-absent"; path: string }
+  | { kind: "gzip-contains" | "symlink-target"; path: string; value: string }
+  | { kind: "command-output"; argv: string[]; value: string; match?: "contains" | "equals" };
+
+export function guestAssertionArgv(input: GuestAssertionInput): string[] {
+  if ("path" in input && (!input.path.startsWith("/") || /[\0\r\n]/.test(input.path))) throw new Error("Guest assertion paths must be absolute single-line paths");
+  switch (input.kind) {
+    case "file-exists": return ["test", "-e", input.path];
+    case "file-absent": return ["test", "!", "-e", input.path];
+    case "gzip-contains":
+      if (!input.value || /[\0\r\n]/.test(input.value)) throw new Error("gzip-contains requires a single-line fixed string");
+      return ["zgrep", "-F", "-m", "1", input.value, input.path];
+    case "symlink-target":
+      if (!input.value || /[\0\r\n]/.test(input.value)) throw new Error("symlink-target requires an expected target");
+      return ["readlink", input.path];
+    case "command-output":
+      if (!input.value || !input.argv.length) throw new Error("command-output requires argv and an expected value");
+      return input.argv;
+  }
+}
+
+export function guestAssertionEvidence(record: GuestCommandRecord, assertion: GuestAssertionInput): Evidence {
+  const commandSucceeded = record.status === "SUCCEEDED" && record.exitCode === 0;
+  const output = record.output.trimEnd();
+  let passed = commandSucceeded;
+  if (assertion.kind === "symlink-target") passed = commandSucceeded && output === assertion.value;
+  if (assertion.kind === "command-output") passed = commandSucceeded && (assertion.match === "equals" ? output === assertion.value : output.includes(assertion.value));
+  let expected: string;
+  switch (assertion.kind) {
+    case "file-exists": expected = `file exists: ${assertion.path}`; break;
+    case "file-absent": expected = `file absent: ${assertion.path}`; break;
+    case "gzip-contains": expected = `${assertion.path} gzip content includes ${JSON.stringify(assertion.value)}`; break;
+    case "symlink-target": expected = `${assertion.path} points to ${JSON.stringify(assertion.value)}`; break;
+    case "command-output": expected = `command output ${assertion.match === "equals" ? "equals" : "contains"} ${JSON.stringify(assertion.value)}`; break;
+  }
+  const exitCode = passed ? 0 : 1;
+  return {
+    id: `ev-${sha256(`${record.id}:${JSON.stringify(assertion)}:${exitCode}:${record.outputSha256 ?? sha256(record.output)}`).slice(0, 16)}`,
+    kind: "command",
+    executionDomain: "guest",
+    claimType: "behavior",
+    source: `guest-assertion:${record.id}`,
+    locator: `qemu job ${record.jobId}`,
+    fact: `Guest assertion ${expected} ${passed ? "PASSED" : "FAILED"}; command exit=${record.exitCode ?? "missing"}`,
+    confidence: record.status === "SUCCEEDED" || record.status === "FAILED" ? "high" : "low",
+    capturedAt: record.completedAt ?? new Date().toISOString(),
+    sha256: record.outputSha256 ?? sha256(record.output),
+    command: record.argv,
+    exitCode,
+    jobId: record.jobId
+  };
+}

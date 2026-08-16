@@ -3,15 +3,17 @@ import { Type } from "typebox";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { ApprovalStore } from "./approval.js";
+import { assertImageManifest } from "./artifact-assertion.js";
 import { applyChangeSet, ChangeSetStore, prepareChangeSet } from "./changes.js";
 import { findConfig, type LocatedConfig } from "./config.js";
-import { guestCommandEvidence, queueGuestCommand, waitForGuestCommand } from "./guest.js";
+import { guestAssertionArgv, guestAssertionEvidence, guestCommandEvidence, queueGuestCommand, waitForGuestCommand, type GuestAssertionInput } from "./guest.js";
 import { jobEvidenceVariants, JobStore, reconcileJob, startJob, stopJob, tailJob } from "./jobs.js";
 import { buildKnowledgeIndex, searchKnowledge } from "./knowledge.js";
 import { analyzeLog } from "./log-analyzer.js";
 import { queryMetadata, type MetadataAction } from "./metadata.js";
 import { preflightFileMirror } from "./mirror.js";
 import { inspectNativeCache } from "./native-cache.js";
+import { assertTargetOptimization } from "./optimization.js";
 import { classifyCommand, classifyFileWrite } from "./policy.js";
 import { reviewYoctoFiles } from "./review.js";
 import { TaskContextStore, TaskStore } from "./state.js";
@@ -20,7 +22,7 @@ import type { Evidence, JobKind, JobPurpose, TaskPhase } from "./types.js";
 import { inspectWorkspace } from "./workspace.js";
 
 const textResult = (value: unknown) => ({ content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }], details: value });
-const phaseSchema = Type.Union(["INTAKE", "INSPECTING", "PLANNING", "WAITING_HUMAN", "EXECUTING", "VERIFYING", "SUMMARIZING", "COMPLETED", "FAILED", "PAUSED"].map((phase) => Type.Literal(phase)));
+const phaseSchema = Type.Union(["INTAKE", "INSPECTING", "PLANNING", "REPLANNING", "WAITING_HUMAN", "EXECUTING", "VERIFYING", "SUMMARIZING", "COMPLETED", "FAILED", "PAUSED"].map((phase) => Type.Literal(phase)));
 
 async function locate(ctx: ExtensionContext): Promise<LocatedConfig> { return findConfig(ctx.cwd); }
 
@@ -134,6 +136,33 @@ export default function piYoctoExtension(pi: ExtensionAPI): void {
       return textResult(params.taskId ? await store.load(params.taskId) : await store.list());
     }
   });
+  pi.registerTool({
+    name: "yocto_completion_status", label: "Check Yocto completion gates",
+    description: "Return server-evaluated completion issues and allowed next actions. Use this before attempting finalization or after any phase/precondition error.",
+    parameters: Type.Object({ taskId: Type.Optional(Type.String()) }),
+    async execute(_id, params, _signal, _update, ctx) {
+      const located = await locate(ctx); const taskId = await requireActiveTask(located, ctx, params.taskId);
+      return textResult(await new TaskStore(located).completionStatus(taskId));
+    }
+  });
+  pi.registerTool({
+    name: "yocto_task_replan", label: "Replan after failed verification",
+    description: "Enter controlled REPLANNING after a failed current verification job or trusted semantic assertion. Requires persisted non-zero current-iteration Evidence, no active jobs, and a remaining fix iteration.",
+    parameters: Type.Object({ taskId: Type.Optional(Type.String()), failedEvidenceId: Type.String() }),
+    async execute(_id, params, _signal, _update, ctx) {
+      const located = await locate(ctx); const taskId = await requireActiveTask(located, ctx, params.taskId);
+      return textResult(await new TaskStore(located).requestReplan(taskId, params.failedEvidenceId));
+    }
+  });
+  pi.registerTool({
+    name: "yocto_task_finalize", label: "Finalize Yocto task",
+    description: "Atomically verify every controller completion gate, capture final job snapshots/log offsets, persist the auditable summary, and set COMPLETED from VERIFYING or SUMMARIZING.",
+    parameters: Type.Object({ taskId: Type.Optional(Type.String()), finalSummary: Type.String({ minLength: 1 }) }),
+    async execute(_id, params, _signal, _update, ctx) {
+      const located = await locate(ctx); const taskId = await requireActiveTask(located, ctx, params.taskId);
+      return textResult(await new TaskStore(located).finalize(taskId, params.finalSummary));
+    }
+  });
 
   pi.registerTool({
     name: "yocto_workspace_inspect", label: "Inspect Poky workspace",
@@ -158,6 +187,21 @@ export default function piYoctoExtension(pi: ExtensionAPI): void {
         await buildKnowledgeIndex(located);
         return textResult(await searchKnowledge(located, params.query, { ...(params.release ? { release: params.release } : {}), ...(params.limit ? { limit: params.limit } : {}) }));
       }
+    }
+  });
+
+  pi.registerTool({
+    name: "yocto_artifact_assert", label: "Assert Yocto build artifact semantics",
+    description: "Assert that the stable manifest from one exact successful image JobRecord contains or omits an exact package. A failed assertion persists trusted non-zero semantic Evidence; mark the related requirement FAILED and pass that Evidence ID to yocto_task_replan instead of marking the task FAILED or cleaning sstate.",
+    parameters: Type.Object({
+      jobId: Type.String(), taskId: Type.Optional(Type.String()), package: Type.String(),
+      expected: Type.Union([Type.Literal("present"), Type.Literal("absent")])
+    }),
+    async execute(_id, params, _signal, _update, ctx) {
+      const located = await locate(ctx); const taskId = await requireActiveTask(located, ctx, params.taskId);
+      const result = await assertImageManifest(located, { taskId, jobId: params.jobId, package: params.package, expected: params.expected });
+      await persistToolEvidence(located, ctx, result.evidence, { requireTask: true, taskId });
+      return textResult(result);
     }
   });
 
@@ -199,16 +243,32 @@ export default function piYoctoExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
+    name: "yocto_optimization_assert", label: "Assert target optimization flags",
+    description: "Run offline bitbake -e for one recipe, require exactly one expected -O flag, optionally inspect its expanded run.do_compile compiler argv, and fingerprint a non-target reference recipe to prove flags did not change globally. Capture the referenceFingerprint before changing metadata, then pass it as expectedReferenceFingerprint after the target build.",
+    parameters: Type.Object({
+      target: Type.String(), expectedFlag: Type.Union(["-O0", "-O1", "-O2", "-O3", "-Os", "-Oz", "-Og", "-Ofast"].map((flag) => Type.Literal(flag))),
+      requireCompileCommand: Type.Optional(Type.Boolean()), compileCommandPath: Type.Optional(Type.String()),
+      referenceTarget: Type.Optional(Type.String()), expectedReferenceFingerprint: Type.Optional(Type.String())
+    }),
+    async execute(_id, params, _signal, _update, ctx) {
+      const located = await locate(ctx); const taskId = await requireActiveTask(located, ctx);
+      const result = await assertTargetOptimization(located, params);
+      await persistToolEvidence(located, ctx, result.evidence, { requireTask: true, taskId });
+      return textResult(result);
+    }
+  });
+
+  pi.registerTool({
     name: "yocto_job_start", label: "Start background Yocto job",
-    description: "Start or reuse one detached offline job bound to the active task. A read-only baseline may run from a checkpointed INSPECTING/PLANNING phase; parse, verification, incremental-confirmation, and QEMU require EXECUTING/VERIFYING. Parse, verification, and QEMU jobs require iteration 1 or 2; incremental-confirmation takes no iteration and only follows a successful verification.",
+    description: "Start or reuse one detached offline job bound to the active task. Baseline and diagnostic jobs may run from checkpointed INSPECTING/PLANNING without consuming a fix iteration. Parse, verification, and QEMU require an iteration; QEMU also requires sourceJobId for the exact successful image job.",
     parameters: Type.Object({
       kind: Type.Union([Type.Literal("bitbake"), Type.Literal("qemu"), Type.Literal("check")]),
-      purpose: Type.Union([Type.Literal("baseline"), Type.Literal("parse"), Type.Literal("verification"), Type.Literal("incremental-confirmation"), Type.Literal("qemu")]),
-      args: Type.Array(Type.String()), taskId: Type.Optional(Type.String()), iteration: Type.Optional(Type.Integer({ minimum: 1, maximum: 2 }))
+      purpose: Type.Union([Type.Literal("baseline"), Type.Literal("diagnostic"), Type.Literal("parse"), Type.Literal("verification"), Type.Literal("incremental-confirmation"), Type.Literal("qemu")]),
+      args: Type.Array(Type.String()), taskId: Type.Optional(Type.String()), iteration: Type.Optional(Type.Integer({ minimum: 1, maximum: 2 })), sourceJobId: Type.Optional(Type.String())
     }),
     async execute(_id, params, _signal, _update, ctx) {
       const located = await locate(ctx); const taskId = await requireActiveTask(located, ctx, params.taskId);
-      return textResult(await startJob(located, { kind: params.kind as JobKind, purpose: params.purpose as JobPurpose, args: params.args, taskId, ...(params.iteration !== undefined ? { iteration: params.iteration } : {}) }));
+      return textResult(await startJob(located, { kind: params.kind as JobKind, purpose: params.purpose as JobPurpose, args: params.args, taskId, ...(params.iteration !== undefined ? { iteration: params.iteration } : {}), ...(params.sourceJobId ? { sourceJobId: params.sourceJobId } : {}) }));
     }
   });
   pi.registerTool({
@@ -235,7 +295,7 @@ export default function piYoctoExtension(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "yocto_job_stop", label: "Stop background Yocto job",
-    description: "Stop a detached job process group after a structured human approval.",
+    description: "The only valid way to stop a detached QEMU/job process group. Call this tool directly with the JobRecord ID and no approvalId: it creates the exact action=stop_job approval and asks the human internally. Never call yocto_approval_request first.",
     parameters: Type.Object({ id: Type.String(), taskId: Type.Optional(Type.String()), approvalId: Type.Optional(Type.String()) }),
     async execute(_id, params, _signal, _update, ctx) {
       const located = await locate(ctx); const taskId = await requireActiveTask(located, ctx, params.taskId); const approvals = new ApprovalStore(located);
@@ -265,6 +325,30 @@ export default function piYoctoExtension(pi: ExtensionAPI): void {
       return textResult({ command, evidence: [evidence] });
     }
   });
+  pi.registerTool({
+    name: "yocto_guest_assert", label: "Assert QEMU guest behavior",
+    description: "Run a structured guest predicate without shell pipes/redirections: file existence/absence, gzip fixed-string content, symlink target, or command output matching. Persists guest behavior Evidence whose exitCode reflects the assertion result.",
+    parameters: Type.Object({
+      jobId: Type.String(), taskId: Type.Optional(Type.String()), timeoutMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 300000 })),
+      kind: Type.Union([Type.Literal("file-exists"), Type.Literal("file-absent"), Type.Literal("gzip-contains"), Type.Literal("symlink-target"), Type.Literal("command-output")]),
+      path: Type.Optional(Type.String()), value: Type.Optional(Type.String()), argv: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 32 })),
+      match: Type.Optional(Type.Union([Type.Literal("contains"), Type.Literal("equals")]))
+    }),
+    async execute(_id, params, signal, _update, ctx) {
+      const located = await locate(ctx); const taskId = await requireActiveTask(located, ctx, params.taskId);
+      const assertion = params.kind === "command-output"
+        ? { kind: params.kind, argv: params.argv ?? [], value: params.value ?? "", ...(params.match ? { match: params.match } : {}) }
+        : params.kind === "file-exists" || params.kind === "file-absent"
+          ? { kind: params.kind, path: params.path ?? "" }
+          : { kind: params.kind, path: params.path ?? "", value: params.value ?? "" } as GuestAssertionInput;
+      const argv = guestAssertionArgv(assertion as GuestAssertionInput);
+      const queued = await queueGuestCommand(located, { taskId, jobId: params.jobId, argv, ...(params.timeoutMs ? { timeoutMs: params.timeoutMs } : {}) });
+      const command = await waitForGuestCommand(located, queued.id, signal);
+      const evidence = guestAssertionEvidence(command, assertion as GuestAssertionInput);
+      await persistToolEvidence(located, ctx, [evidence], { requireTask: true, taskId });
+      return textResult({ passed: evidence.exitCode === 0, assertion, command, evidence: [evidence] });
+    }
+  });
 
   pi.registerTool({
     name: "yocto_checkpoint", label: "Checkpoint Yocto task",
@@ -277,12 +361,13 @@ export default function piYoctoExtension(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, _signal, _update, ctx) {
       const located = await locate(ctx); const taskId = await requireActiveTask(located, ctx, params.taskId); const store = new TaskStore(located); const task = await store.load(taskId); const latest = task.checkpoints.at(-1);
-      return textResult(await store.checkpoint(taskId, {
+      const updated = await store.checkpoint(taskId, {
         objective: params.objective, phase: params.phase as TaskPhase, modifiedFiles: params.modifiedFiles,
         evidenceIds: ((params.evidence ?? []) as Evidence[]).map((item) => item.id), completedSteps: params.completedSteps, pendingSteps: params.pendingSteps,
         jobIds: params.jobIds ?? latest?.jobIds ?? task.jobIds, logOffsets: params.logOffsets ?? latest?.logOffsets ?? {},
         ...(params.resumeAction ? { resumeAction: params.resumeAction } : {}), ...(params.finalSummary ? { finalSummary: params.finalSummary } : {})
-      }, (params.evidence ?? []) as Evidence[]));
+      }, (params.evidence ?? []) as Evidence[]);
+      return textResult(params.phase === "VERIFYING" ? { ...updated, verificationReadiness: await store.requiredJobStatus(taskId) } : updated);
     }
   });
 
@@ -293,7 +378,8 @@ export default function piYoctoExtension(pi: ExtensionAPI): void {
       taskId: Type.Optional(Type.String()), requirements: Type.Array(Type.Object({
         id: Type.String(), description: Type.String(), required: Type.Boolean(),
         expectedDomain: Type.Optional(Type.Union(["host", "guest", "build", "metadata", "source", "documentation"].map((value) => Type.Literal(value)))),
-        expectedClaimType: Type.Optional(Type.Union(["observation", "diagnosis", "configuration", "build", "artifact", "execution", "behavior"].map((value) => Type.Literal(value))))
+        expectedClaimType: Type.Optional(Type.Union(["observation", "diagnosis", "configuration", "build", "artifact", "execution", "behavior"].map((value) => Type.Literal(value)))),
+        expectedEvidenceSource: Type.Optional(Type.String({ minLength: 1 }))
       }), { minItems: 1 })
     }),
     async execute(_id, params, _signal, _update, ctx) {
@@ -369,10 +455,11 @@ export default function piYoctoExtension(pi: ExtensionAPI): void {
 
   pi.registerTool({
     name: "yocto_approval_request", label: "Request Yocto approval",
-    description: "Create an expiring approval bound to a task, normalized command and exact file set, then ask the human when UI is available.",
+    description: "Create an expiring approval for an otherwise unsupported high-risk action. Reserved actions apply_change_set and stop_job are rejected here because yocto_change_prepare and yocto_job_stop must create their own content/job-bound approvals.",
     parameters: Type.Object({ taskId: Type.String(), action: Type.String(), command: Type.Optional(Type.String()), files: Type.Optional(Type.Array(Type.String())), impact: Type.String(), estimatedDuration: Type.Optional(Type.String()), risk: Type.String(), recovery: Type.String(), ttlMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 1440 })) }),
     async execute(_id, params, _signal, _update, ctx) {
       const located = await locate(ctx); const taskId = await requireActiveTask(located, ctx, params.taskId);
+      if (["apply_change_set", "stop_job"].includes(params.action)) throw new Error(`Reserved approval action ${params.action}; call ${params.action === "stop_job" ? "yocto_job_stop with the exact JobRecord ID and no approvalId" : "yocto_change_prepare"} directly`);
       return textResult(await promptApproval(located, ctx, { taskId, action: params.action, ...(params.command ? { command: params.command } : {}), ...(params.files ? { files: params.files } : {}), impact: params.impact, ...(params.estimatedDuration ? { estimatedDuration: params.estimatedDuration } : {}), risk: params.risk, recovery: params.recovery, ...(params.ttlMinutes ? { ttlMinutes: params.ttlMinutes } : {}) }));
     }
   });
@@ -383,6 +470,7 @@ export default function piYoctoExtension(pi: ExtensionAPI): void {
     if (event.toolName === "bash") {
       const command = String((event.input as { command?: unknown }).command ?? ""); const decision = classifyCommand(command, located.config.offline.blockExplicitNetworkCommands);
       if (/\b(?:bitbake(?:-layers)?|runqemu)\b/.test(command)) return { block: true, reason: "Direct BitBake/runqemu shell execution bypasses task budgets and checkpointing; use yocto_metadata_query or yocto_job_start" };
+      if (/\b(?:kill|pkill|killall)\b/i.test(command)) return { block: true, reason: "Direct process termination cannot consume a JobRecord-bound approval; use yocto_job_stop for the exact job" };
       if (decision.category === "workspace-write") return { block: true, reason: `${decision.reason}; protected writes must use yocto_change_prepare followed by yocto_change_apply` };
       if (decision.requiresApproval) {
         const taskId = await requireActiveTask(located, ctx);
@@ -423,7 +511,19 @@ export default function piYoctoExtension(pi: ExtensionAPI): void {
     try {
       const located = await locate(ctx);
       const active = await new TaskContextStore(located).active(sessionId(ctx));
-      return { systemPrompt: `${event.systemPrompt}\n\nPi Yocto harness is configured at ${located.configPath}. ${active ? `The only active TaskRecord is ${active}; pass no different task ID.` : "No TaskRecord is active; call yocto_task_open before any evidence-producing query, approval, change, or job."} BitBake is offline (BB_NO_NETWORK=1). The TaskRecord may already contain a controller-defined verification contract, fixed input manifest, and completionPolicy; never replace that contract, consume every required input exactly, persist any required multi-option decision, and execute every required job kind/purpose/target before COMPLETED. A fixed file:// input belongs in the consuming recipe's own files/ directory unless existing metadata proves another FILESPATH; do not invent LAYERDIR in recipe metadata. Protected changes must use immutable yocto_change_prepare/yocto_change_apply; generic write/edit and direct BitBake shells are blocked. Normal offline metadata, baseline, parse, BitBake verification, incremental-confirmation, and QEMU starts are already policy-authorized: call their tools directly and do not create an extra approval request. The extension itself requests human approval only for exact ChangeSet application and stopping a running job: for stop, call yocto_job_stop without making a separate yocto_approval_request. Use this phase order: INTAKE -> INSPECTING (workspace, metadata, and any read-only baseline job) -> PLANNING -> WAITING_HUMAN -> EXECUTING -> VERIFYING -> SUMMARIZING. Baseline jobs may start from a checkpointed INSPECTING/PLANNING phase; every other job requires a pre-existing EXECUTING/VERIFYING checkpoint. Parse, verification, and QEMU use an iteration no greater than ${located.config.limits.maxFixIterations}. A rejected precondition call never counts as an iteration, so correct the phase and retry the same iteration instead of skipping it. Typed Evidence returned by harness tools is persisted automatically: select the observation/configuration/diagnosis ID matching each contract and use it directly in yocto_verification_update; do not copy partial Evidence through a checkpoint merely to register it. yocto_checkpoint snapshots job offsets and PID/PGID/start-ticks/boot-id/heartbeat server-side. For QEMU, pass the image target or exact qemuboot.conf; the harness resolves a unique deploy config and adds nographic+slirp. Use yocto_guest_exec for guest behavior, use text-producing commands instead of dumping binary files, stop every QEMU job before finalization, and never promote host/source observations to guest execution evidence. Preserve all pre-existing dirty files and never clean caches or force tasks.` };
+      const rules = [
+        `Pi Yocto harness is configured at ${located.configPath}.`,
+        active ? `The only active TaskRecord is ${active}; pass no different task ID.` : "No TaskRecord is active; call yocto_task_open before any evidence-producing query, approval, change, or job.",
+        "BitBake is offline (BB_NO_NETWORK=1). Never replace a controller verification contract; satisfy every required input, review, decision, job, and verification gate.",
+        "Protected changes require yocto_change_prepare/yocto_change_apply. The extension requests exact human approval for ChangeSets and job stops; ordinary offline diagnostic, parse, build, and QEMU tools need no extra approval.",
+        "Normal flow is INTAKE -> INSPECTING -> PLANNING -> WAITING_HUMAN -> EXECUTING -> VERIFYING. A diagnostic job may reproduce a failure during INSPECTING without consuming an iteration. After failed verification, call yocto_task_replan with its non-zero current-run Evidence; never force VERIFYING back through generic checkpoints.",
+        `Parse, verification, and QEMU use iterations up to ${located.config.limits.maxFixIterations}; an unchanged failed verification cannot be repeated.`,
+        "A VERIFYING checkpoint returns verificationReadiness with every missing controller-required parse/image/QEMU/incremental Job and a suggested legal tool call; run those jobs before summary. Call yocto_completion_status before finishing and yocto_task_finalize for atomic summary/checkpoint/COMPLETED state instead of manually sequencing final phases.",
+        "For QEMU, pass the image target plus sourceJobId of the exact successful image JobRecord. Use yocto_guest_assert for file, gzip, symlink, and output predicates; do not encode pipes or redirections as argv. To stop QEMU, call yocto_job_stop directly with its ID and no approvalId; that tool creates action=stop_job approval internally. Never call yocto_approval_request for a stop.",
+        "After a successful image build, use yocto_artifact_assert for required package presence/absence. If the semantic assertion fails, bind its non-zero Evidence to the requirement as FAILED and call yocto_task_replan; do not transition the whole task to FAILED and do not clean or force BitBake.",
+        "For a target-only optimization, call yocto_optimization_assert before the change to capture a non-target referenceFingerprint, then after the package build require the intended flag, compiler argv, and unchanged reference fingerprint; never infer success from build exit alone. Tool Evidence is persisted server-side; bind its exact ID with yocto_verification_update. Preserve pre-existing dirty files and never clean caches, force tasks, fetch, or promote host observations to guest evidence."
+      ];
+      return { systemPrompt: `${event.systemPrompt}\n\n${rules.join(" ")}` };
     } catch { return undefined; }
   });
 

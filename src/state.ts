@@ -3,20 +3,21 @@ import { isAbsolute, join, resolve } from "node:path";
 import type { LocatedConfig } from "./config.js";
 import { loadProjectContract, workspaceIdentity } from "./contracts.js";
 import { newId, pathExists, readJson, sha256, withFileLock, writeJsonAtomic } from "./fs-utils.js";
-import type { ChangeSetRecord, Checkpoint, Evidence, JobPurpose, JobRecord, JobSnapshot, JobStatus, ReviewRecord, TaskPhase, TaskRecord, VerificationRequirement } from "./types.js";
+import type { ChangeSetRecord, Checkpoint, Evidence, JobPurpose, JobRecord, JobSnapshot, JobStatus, RequiredJob, ReviewRecord, TaskPhase, TaskRecord, VerificationRequirement } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
 const transitions: Record<TaskPhase, TaskPhase[]> = {
   INTAKE: ["INSPECTING", "PAUSED", "FAILED"],
   INSPECTING: ["PLANNING", "PAUSED", "FAILED"],
   PLANNING: ["WAITING_HUMAN", "EXECUTING", "PAUSED", "FAILED"],
+  REPLANNING: ["WAITING_HUMAN", "PAUSED", "FAILED"],
   WAITING_HUMAN: ["EXECUTING", "PAUSED", "FAILED"],
   EXECUTING: ["VERIFYING", "PAUSED", "FAILED"],
   VERIFYING: ["EXECUTING", "SUMMARIZING", "PAUSED", "FAILED"],
   SUMMARIZING: ["COMPLETED", "PAUSED", "FAILED"],
   COMPLETED: [],
-  FAILED: ["INSPECTING", "PLANNING", "EXECUTING", "VERIFYING", "PAUSED"],
-  PAUSED: ["INSPECTING", "PLANNING", "WAITING_HUMAN", "EXECUTING", "VERIFYING", "SUMMARIZING"]
+  FAILED: [],
+  PAUSED: ["INSPECTING", "PLANNING", "REPLANNING", "WAITING_HUMAN", "EXECUTING", "VERIFYING", "SUMMARIZING"]
 };
 
 export function canTransition(from: TaskPhase, to: TaskPhase): boolean {
@@ -83,6 +84,16 @@ function jobTarget(job: JobRecord): string {
   return job.args.filter((argument) => !argument.startsWith("-")).join(" ");
 }
 
+function requiredJobMatches(job: JobRecord, requirement: RequiredJob): boolean {
+  return job.purpose === requirement.purpose
+    && (!requirement.kind || job.kind === requirement.kind)
+    && (!requirement.target || jobTarget(job) === requirement.target);
+}
+
+function allowedRequiredJobStatuses(requirement: RequiredJob): JobStatus[] {
+  return requirement.allowedStatuses ?? (requirement.purpose === "qemu" ? ["STOPPED"] : ["SUCCEEDED"]);
+}
+
 async function loadTaskJobs(located: LocatedConfig, task: TaskRecord): Promise<JobRecord[]> {
   const jobs: JobRecord[] = [];
   for (const id of task.jobIds) {
@@ -146,12 +157,8 @@ async function assertCompletionPolicy(located: LocatedConfig, task: TaskRecord, 
   if (!policy) return;
   const jobs = await loadTaskJobs(located, task);
   for (const requirement of policy.requiredJobs ?? []) {
-    const allowed = requirement.allowedStatuses ?? (requirement.purpose === "qemu" ? ["STOPPED"] : ["SUCCEEDED"]);
-    const matches = jobs.filter((job) =>
-      job.purpose === requirement.purpose
-      && (!requirement.kind || job.kind === requirement.kind)
-      && (!requirement.target || jobTarget(job) === requirement.target)
-      && allowed.includes(job.status));
+    const allowed = allowedRequiredJobStatuses(requirement);
+    const matches = jobs.filter((job) => requiredJobMatches(job, requirement) && allowed.includes(job.status));
     if (matches.length < (requirement.minCount ?? 1)) throw new Error(`Completion policy requires ${requirement.id}: ${requirement.purpose} ${requirement.target ?? "*"} in ${allowed.join("/")}`);
   }
   if (policy.requireNoActiveJobs) {
@@ -166,7 +173,7 @@ async function assertCompletionPolicy(located: LocatedConfig, task: TaskRecord, 
   if (policy.requireJobIdentitySnapshots) {
     const snapshots = checkpoint?.jobSnapshots ?? {};
     const requiredIds = new Set((policy.requiredJobs ?? []).flatMap((requirement) => jobs
-      .filter((job) => job.purpose === requirement.purpose && (!requirement.kind || job.kind === requirement.kind) && (!requirement.target || jobTarget(job) === requirement.target))
+      .filter((job) => requiredJobMatches(job, requirement))
       .map((job) => job.id)));
     const missing = [...requiredIds].filter((id) => {
       const snapshot = snapshots[id];
@@ -251,13 +258,179 @@ export class TaskStore {
     return task;
   }
 
+  async requiredJobStatus(id: string): Promise<{
+    ready: boolean;
+    missing: Array<{ id: string; kind: string; purpose: JobPurpose; target?: string; requiredCount: number; satisfiedCount: number; allowedStatuses: JobStatus[]; suggestedCall: Record<string, unknown> }>;
+    satisfied: Array<{ id: string; jobIds: string[] }>;
+  }> {
+    const task = await this.load(id);
+    const jobs = await loadTaskJobs(this.located, task);
+    const missing: Array<{ id: string; kind: string; purpose: JobPurpose; target?: string; requiredCount: number; satisfiedCount: number; allowedStatuses: JobStatus[]; suggestedCall: Record<string, unknown> }> = [];
+    const satisfied: Array<{ id: string; jobIds: string[] }> = [];
+    const iteration = Math.max(1, task.currentFixIteration || 1);
+    for (const requirement of task.completionPolicy?.requiredJobs ?? []) {
+      const allowedStatuses = allowedRequiredJobStatuses(requirement);
+      const matches = jobs.filter((job) => requiredJobMatches(job, requirement) && allowedStatuses.includes(job.status));
+      const requiredCount = requirement.minCount ?? 1;
+      if (matches.length >= requiredCount) {
+        satisfied.push({ id: requirement.id, jobIds: matches.map((job) => job.id) });
+        continue;
+      }
+      const kind = requirement.kind ?? (requirement.purpose === "qemu" ? "qemu" : requirement.purpose === "parse" ? "check" : "bitbake");
+      const suggestedCall: Record<string, unknown> = {
+        tool: "yocto_job_start",
+        kind,
+        purpose: requirement.purpose,
+        args: requirement.purpose === "parse" ? ["-p"] : requirement.target ? [requirement.target] : []
+      };
+      if (["parse", "verification", "qemu"].includes(requirement.purpose)) suggestedCall.iteration = iteration;
+      if (requirement.purpose === "qemu") {
+        const source = [...jobs].reverse().find((job) => job.kind === "bitbake" && job.purpose === "verification" && job.status === "SUCCEEDED" && job.artifacts.some((artifact) => artifact.endsWith(".qemuboot.conf")));
+        if (source) {
+          suggestedCall.sourceJobId = source.id;
+          suggestedCall.args = requirement.target ? [requirement.target] : [jobTarget(source)];
+        } else suggestedCall.blockedBy = "a successful verification image job with a qemuboot.conf artifact";
+      }
+      missing.push({
+        id: requirement.id,
+        kind,
+        purpose: requirement.purpose,
+        ...(requirement.target ? { target: requirement.target } : {}),
+        requiredCount,
+        satisfiedCount: matches.length,
+        allowedStatuses,
+        suggestedCall
+      });
+    }
+    return { ready: missing.length === 0, missing, satisfied };
+  }
+
+  async completionStatus(id: string): Promise<{ taskId: string; currentPhase: TaskPhase; ready: boolean; issues: string[]; allowedNextActions: string[] }> {
+    const task = await this.load(id);
+    const issues: string[] = [];
+    if (!["VERIFYING", "SUMMARIZING"].includes(task.phase)) issues.push(`Finalization requires VERIFYING or SUMMARIZING; current phase is ${task.phase}`);
+    const required = task.verificationContract?.requirements.filter((item) => item.required) ?? [];
+    if (!task.verificationContract) issues.push("No verification contract is recorded");
+    for (const requirement of required.filter((item) => item.status !== "PASSED")) issues.push(`Required verification ${requirement.id} is ${requirement.status}`);
+    const latest = task.checkpoints.at(-1);
+    const checkpoint = latest ? await hydrateCheckpoint(this.located, task, {
+      objective: latest.objective,
+      phase: task.phase,
+      modifiedFiles: latest.modifiedFiles,
+      evidenceIds: latest.evidenceIds,
+      completedSteps: latest.completedSteps,
+      pendingSteps: [],
+      jobIds: task.jobIds,
+      logOffsets: latest.logOffsets,
+      ...(latest.resumeAction ? { resumeAction: latest.resumeAction } : {})
+    }) : undefined;
+    try { await assertCompletionPolicy(this.located, task, checkpoint); }
+    catch (error) { issues.push(error instanceof Error ? error.message : String(error)); }
+    const jobs = await loadTaskJobs(this.located, task);
+    const requiredJobs = await this.requiredJobStatus(id);
+    const active = jobs.filter((job) => ["QUEUED", "RUNNING", "STOPPING"].includes(job.status));
+    const failed = jobs.some((job) => job.status === "FAILED" && job.iteration === task.currentFixIteration && task.evidence.some((item) => item.jobId === job.id && (item.exitCode ?? 0) !== 0));
+    const semanticFailure = task.verificationContract?.requirements.some((requirement) => requirement.status === "FAILED" && requirement.evidenceIds.some((evidenceId) => {
+      const evidence = task.evidence.find((item) => item.id === evidenceId);
+      return evidence?.provenance === "harness-tool" && Number.isInteger(evidence.exitCode) && evidence.exitCode !== 0;
+    })) ?? false;
+    const allowedNextActions: string[] = [];
+    for (const job of active) {
+      allowedNextActions.push(job.kind === "qemu"
+        ? `stop-active-qemu:${JSON.stringify({ tool: "yocto_job_stop", id: job.id, taskId: task.id })}`
+        : `monitor-active-job:${JSON.stringify({ tool: "yocto_job_status", id: job.id })}`);
+    }
+    if (required.some((item) => item.status !== "PASSED")) allowedNextActions.push("record-required-verification-results");
+    for (const requirement of requiredJobs.missing) allowedNextActions.push(`run-required-job:${requirement.id}:${JSON.stringify(requirement.suggestedCall)}`);
+    if ((failed || semanticFailure) && task.currentFixIteration < this.located.config.limits.maxFixIterations && !active.length) allowedNextActions.push("request-controlled-replan");
+    if (!issues.length) allowedNextActions.push("finalize-task-atomically");
+    return { taskId: id, currentPhase: task.phase, ready: issues.length === 0, issues: [...new Set(issues)], allowedNextActions };
+  }
+
+  async requestReplan(id: string, failedEvidenceId: string): Promise<TaskRecord> {
+    return withFileLock(`${this.path(id)}.lock`, async () => {
+      const task = await this.load(id);
+      if (!["EXECUTING", "VERIFYING"].includes(task.phase)) throw new Error(`Controlled replanning requires EXECUTING/VERIFYING; currentPhase=${task.phase}; allowedNextActions=inspect-task-status`);
+      if (task.currentFixIteration >= this.located.config.limits.maxFixIterations) throw new Error(`Fix iteration limit ${this.located.config.limits.maxFixIterations} is exhausted; currentPhase=${task.phase}; allowedNextActions=pause-or-fail-task`);
+      const jobs = await loadTaskJobs(this.located, task);
+      const active = jobs.filter((job) => ["QUEUED", "RUNNING", "STOPPING"].includes(job.status));
+      if (active.length) throw new Error(`Cannot replan with active jobs: ${active.map((job) => `${job.id}:${job.status}`).join(", ")}; currentPhase=${task.phase}; allowedNextActions=monitor-or-stop-active-jobs`);
+      const evidence = task.evidence.find((item) => item.id === failedEvidenceId);
+      if (!evidence || !Number.isInteger(evidence.exitCode) || evidence.exitCode === 0) throw new Error(`Controlled replanning requires persisted non-zero current-run evidence; currentPhase=${task.phase}; allowedNextActions=record-failed-verification-evidence`);
+      const evidenceJob = evidence.jobId ? jobs.find((job) => job.id === evidence.jobId) : undefined;
+      const failedJobEvidence = evidenceJob?.status === "FAILED" && evidenceJob.iteration === task.currentFixIteration;
+      const failedRequirement = task.verificationContract?.requirements.find((requirement) => requirement.status === "FAILED" && requirement.evidenceIds.includes(failedEvidenceId));
+      const currentIterationJobs = jobs.filter((job) => job.iteration === task.currentFixIteration);
+      const iterationStartedAt = currentIterationJobs.map((job) => Date.parse(job.createdAt)).filter(Number.isFinite).sort((a, b) => a - b)[0];
+      const currentSemanticEvidence = Boolean(
+        failedRequirement
+        && evidence.provenance === "harness-tool"
+        && ["execution", "behavior", "build", "configuration", "diagnosis"].includes(evidence.claimType)
+        && currentIterationJobs.length
+        && (evidenceJob ? evidenceJob.iteration === task.currentFixIteration : iterationStartedAt !== undefined && Date.parse(evidence.capturedAt) >= iterationStartedAt)
+      );
+      if (!failedJobEvidence && !currentSemanticEvidence) throw new Error(`Evidence ${failedEvidenceId} is neither a failed current verification Job nor trusted FAILED requirement evidence from the current iteration; currentPhase=${task.phase}; allowedNextActions=record-failed-verification-evidence`);
+      const latest = task.checkpoints.at(-1);
+      const checkpoint = await hydrateCheckpoint(this.located, task, {
+        objective: task.objective,
+        phase: "REPLANNING",
+        modifiedFiles: latest?.modifiedFiles ?? [],
+        evidenceIds: [...new Set([...(latest?.evidenceIds ?? []), failedEvidenceId])],
+        completedSteps: [...new Set([...(latest?.completedSteps ?? []), `verification iteration ${task.currentFixIteration} failed with ${failedEvidenceId}`])],
+        pendingSteps: ["prepare a revised ChangeSet", `run verification iteration ${task.currentFixIteration + 1}`],
+        jobIds: task.jobIds,
+        logOffsets: latest?.logOffsets ?? {},
+        resumeAction: "Prepare one evidence-driven revised ChangeSet, obtain approval, apply it, then run the next verification iteration"
+      });
+      const next: TaskRecord = {
+        ...task,
+        phase: "REPLANNING",
+        checkpoints: [...task.checkpoints, { ...checkpoint, createdAt: new Date().toISOString() }],
+        updatedAt: new Date().toISOString()
+      };
+      await this.save(next);
+      return next;
+    });
+  }
+
+  async finalize(id: string, finalSummary: string): Promise<TaskRecord> {
+    if (!finalSummary.trim()) throw new Error("Atomic finalization requires an auditable final summary");
+    return withFileLock(`${this.path(id)}.lock`, async () => {
+      const task = await this.load(id);
+      if (!["VERIFYING", "SUMMARIZING"].includes(task.phase)) throw new Error(`Atomic finalization requires VERIFYING/SUMMARIZING; currentPhase=${task.phase}; allowedNextActions=complete-current-phase`);
+      const required = task.verificationContract?.requirements.filter((item) => item.required) ?? [];
+      if (!task.verificationContract || required.some((item) => item.status !== "PASSED")) throw new Error(`Task cannot finalize until every required verification item has PASSED evidence; currentPhase=${task.phase}; allowedNextActions=record-required-verification-results`);
+      const latest = task.checkpoints.at(-1);
+      const checkpoint = await hydrateCheckpoint(this.located, task, {
+        objective: task.objective,
+        phase: "COMPLETED",
+        modifiedFiles: latest?.modifiedFiles ?? [],
+        evidenceIds: [...new Set(task.evidence.map((item) => item.id))],
+        completedSteps: [...new Set([...(latest?.completedSteps ?? []), "all required verification passed", "auditable summary finalized"])],
+        pendingSteps: [],
+        jobIds: task.jobIds,
+        logOffsets: latest?.logOffsets ?? {}
+      });
+      await assertCompletionPolicy(this.located, task, checkpoint);
+      const completed: TaskRecord = {
+        ...task,
+        phase: "COMPLETED",
+        finalSummary: finalSummary.trim(),
+        checkpoints: [...task.checkpoints, { ...checkpoint, createdAt: new Date().toISOString() }],
+        updatedAt: new Date().toISOString()
+      };
+      await this.save(completed);
+      return completed;
+    });
+  }
+
   async checkpoint(id: string, input: Omit<Checkpoint, "createdAt"> & { finalSummary?: string }, evidence: Evidence[] = []): Promise<TaskRecord> {
     return withFileLock(`${this.path(id)}.lock`, async () => {
       const task = await this.load(id);
       if (task.objective !== input.objective) throw new Error(`Checkpoint objective does not match task ${id}`);
       if (task.phase !== input.phase && !canTransition(task.phase, input.phase)) throw new Error(`Invalid task transition ${task.phase} -> ${input.phase}`);
       const workspaceId = task.workspaceId ?? workspaceIdentity(this.located);
-      const boundEvidence = evidence.map((item) => ({ ...normalizeEvidence(item), workspaceId: item.workspaceId ?? workspaceId }));
+      const boundEvidence = evidence.map((item) => ({ ...normalizeEvidence(item), workspaceId: item.workspaceId ?? workspaceId, provenance: "checkpoint" as const }));
       for (const item of boundEvidence) {
         assertEvidence(item);
         if (item.workspaceId !== workspaceId) throw new Error(`Evidence ${item.id} belongs to a different workspace/run`);
@@ -272,6 +445,20 @@ export class TaskStore {
       const known = new Set(task.evidence.map((item) => item.id));
       const appended = boundEvidence.filter((item) => !known.has(item.id));
       const { finalSummary, ...rawCheckpoint } = input;
+      if (input.phase === "FAILED") {
+        if (input.pendingSteps.length) throw new Error("Terminal FAILED cannot retain pending recovery steps; use PAUSED, or record trusted failed semantic Evidence and call yocto_task_replan");
+        const allEvidence = [...task.evidence, ...appended];
+        const repairableEvidence = task.verificationContract?.requirements.flatMap((requirement) => requirement.status === "FAILED"
+          ? requirement.evidenceIds.filter((evidenceId) => {
+            const item = allEvidence.find((candidate) => candidate.id === evidenceId);
+            return item?.provenance === "harness-tool" && Number.isInteger(item.exitCode) && item.exitCode !== 0;
+          })
+          : [])[0];
+        const failedAttempt = task.verificationAttempts.some((attempt) => attempt.iteration === task.currentFixIteration && attempt.status === "FAILED");
+        if (task.currentFixIteration < this.located.config.limits.maxFixIterations && (repairableEvidence || failedAttempt)) {
+          throw new Error(`Task has a remaining controlled repair iteration; call yocto_task_replan${repairableEvidence ? ` with failedEvidenceId=${repairableEvidence}` : " with current failed-job Evidence"} instead of terminal FAILED`);
+        }
+      }
       const checkpoint = await hydrateCheckpoint(this.located, task, rawCheckpoint);
       if (input.phase === "COMPLETED") {
         const required = task.verificationContract?.requirements.filter((item) => item.required) ?? [];
@@ -304,7 +491,7 @@ export class TaskStore {
     return withFileLock(`${this.path(id)}.lock`, async () => {
       const task = await this.load(id);
       const workspaceId = task.workspaceId ?? workspaceIdentity(this.located);
-      const boundEvidence = evidence.map((item) => ({ ...normalizeEvidence(item), workspaceId: item.workspaceId ?? workspaceId }));
+      const boundEvidence = evidence.map((item) => ({ ...normalizeEvidence(item), workspaceId: item.workspaceId ?? workspaceId, provenance: "harness-tool" as const }));
       for (const item of boundEvidence) {
         assertEvidence(item);
         if (item.workspaceId !== workspaceId) throw new Error(`Evidence ${item.id} belongs to a different workspace/run`);
@@ -342,7 +529,7 @@ export class TaskStore {
     return withFileLock(`${this.path(id)}.lock`, async () => {
       const task = await this.load(id);
       const workspaceId = task.workspaceId ?? workspaceIdentity(this.located);
-      const normalized = evidence.map((item) => ({ ...normalizeEvidence(item), workspaceId: item.workspaceId ?? workspaceId }));
+      const normalized = evidence.map((item) => ({ ...normalizeEvidence(item), workspaceId: item.workspaceId ?? workspaceId, provenance: "harness-tool" as const }));
       for (const item of normalized) assertEvidence(item);
       const known = new Set(task.evidence.map((item) => item.id));
       const next: TaskRecord = {
@@ -380,14 +567,14 @@ export class TaskStore {
     });
   }
 
-  async reserveJob(id: string, input: { jobId: string; purpose: JobPurpose; fingerprint: string; target: string; iteration?: number }): Promise<TaskRecord> {
+  async reserveJob(id: string, input: { jobId: string; purpose: JobPurpose; fingerprint: string; inputFingerprint?: string; target: string; iteration?: number }): Promise<TaskRecord> {
     return this.mutate(id, (task) => {
-      const allowedPhases = input.purpose === "baseline"
+      const allowedPhases = input.purpose === "baseline" || input.purpose === "diagnostic"
         ? ["INSPECTING", "PLANNING", "EXECUTING", "VERIFYING"]
         : ["EXECUTING", "VERIFYING"];
       if (!task.checkpoints.length || !allowedPhases.includes(task.phase)) {
-        throw new Error(input.purpose === "baseline"
-          ? `Task ${id} must checkpoint into INSPECTING/PLANNING before a baseline job (legacy EXECUTING/VERIFYING is also accepted)`
+        throw new Error(input.purpose === "baseline" || input.purpose === "diagnostic"
+          ? `Task ${id} must checkpoint into INSPECTING/PLANNING before a ${input.purpose} job (legacy EXECUTING/VERIFYING is also accepted)`
           : `Task ${id} must checkpoint into EXECUTING/VERIFYING before starting a ${input.purpose} job`);
       }
       let currentFixIteration = task.currentFixIteration;
@@ -402,7 +589,11 @@ export class TaskStore {
         if (!input.iteration) throw new Error("Verification jobs require an iteration");
         const same = attempts.find((attempt) => attempt.target === input.target && attempt.iteration === input.iteration);
         if (same) throw new Error(`Verification job for ${input.target} is already recorded as ${same.jobId} for iteration ${input.iteration}`);
-        attempts.push({ iteration: input.iteration, jobId: input.jobId, fingerprint: input.fingerprint, target: input.target, status: "QUEUED", createdAt: new Date().toISOString() });
+        const previous = attempts.filter((attempt) => attempt.target === input.target).sort((a, b) => b.iteration - a.iteration)[0];
+        if (previous && previous.status === "FAILED" && previous.inputFingerprint && previous.inputFingerprint === input.inputFingerprint) {
+          throw new Error(`Verification input is unchanged since failed job ${previous.jobId}; currentPhase=${task.phase}; allowedNextActions=prepare-and-apply-a-revised-ChangeSet`);
+        }
+        attempts.push({ iteration: input.iteration, jobId: input.jobId, fingerprint: input.fingerprint, ...(input.inputFingerprint ? { inputFingerprint: input.inputFingerprint } : {}), target: input.target, status: "QUEUED", createdAt: new Date().toISOString() });
       }
       const latest = task.checkpoints.at(-1);
       const jobIds = [...new Set([...task.jobIds, input.jobId])];
@@ -458,6 +649,9 @@ export class TaskStore {
       if (status === "PASSED" && !evidence.length) throw new Error(`PASSED verification ${requirementId} requires evidence`);
       if (status === "PASSED" && requirement.expectedDomain && evidence.some((item) => item.executionDomain !== requirement.expectedDomain)) throw new Error(`Verification ${requirementId} requires ${requirement.expectedDomain} evidence`);
       if (status === "PASSED" && requirement.expectedClaimType && evidence.some((item) => item.claimType !== requirement.expectedClaimType)) throw new Error(`Verification ${requirementId} requires ${requirement.expectedClaimType} evidence`);
+      if (status === "PASSED" && requirement.expectedEvidenceSource && evidence.some((item) => item.source !== requirement.expectedEvidenceSource || item.provenance !== "harness-tool")) {
+        throw new Error(`Verification ${requirementId} requires trusted evidence from ${requirement.expectedEvidenceSource}`);
+      }
       if (status === "PASSED" && evidence.some((item) => ["execution", "behavior", "build"].includes(item.claimType) && item.exitCode !== 0)) throw new Error(`Verification ${requirementId} contains a non-zero exit code`);
       return {
         ...task,

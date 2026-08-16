@@ -9,10 +9,10 @@ export interface PolicyDecision {
 }
 
 const networkPattern = /(^|[;&|]\s*|\b)(curl|wget|git\s+clone|npm\s+(?:install|i|ci)|pip\s+install|cargo\s+install)\b/i;
-const destructivePattern = /(?:^|[;&|\n]\s*|\b(?:sudo|command|xargs)\s+)(?:rm|rmdir|unlink|shred)(?:\s|$)|\bfind\b[^\n;&|]*\s-delete\b|\b(?:cleanall|cleansstate|bitbake\s+[^\n]*-c\s+clean|bitbake-layers\s+(?:add-layer|remove-layer))\b/i;
+const destructivePattern = /\b(?:rm|rmdir|unlink|shred|kill|pkill|killall)\b|\bfind\b[^\n;&|]*\s-delete\b|\b(?:cleanall|cleansstate|bitbake\s+[^\n]*-c\s+clean|bitbake-layers\s+(?:add-layer|remove-layer))\b/i;
 const forcePattern = /\bbitbake\b[^\n]*(?:\s-f\b|--force\b)/i;
 const gitWritePattern = /\bgit\s+(?:commit|push|reset|clean|checkout|restore|rebase|merge|apply|am)\b/i;
-const shellWritePattern = /\b(?:apply_patch|patch|tee|truncate|install|mv|cp|chmod|chown)\b|\bsed\b[^\n]*\s-i(?:\s|$)|\bperl\b[^\n]*\s-pi(?:\s|$)|(?:^|[;&|]\s*|\s)(?:>|>>)[^=]/i;
+const shellWritePattern = /\b(?:apply_patch|patch|tee|truncate|install|mkdir|mkfifo|mknod|touch|mv|cp|chmod|chown)\b|\bsed\b[^\n]*\s-i(?:\s|$)|\bperl\b[^\n]*\s-pi(?:\s|$)|(?:^|[;&|]\s*|\s)(?:>|>>)[^=]/i;
 
 export function classifyCommand(command: string, offline = true): PolicyDecision {
   if (offline && networkPattern.test(command)) return { allowed: false, requiresApproval: true, category: "network", reason: "Explicit network command is blocked by the offline policy" };

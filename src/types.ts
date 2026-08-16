@@ -4,6 +4,7 @@ export type TaskPhase =
   | "INTAKE"
   | "INSPECTING"
   | "PLANNING"
+  | "REPLANNING"
   | "WAITING_HUMAN"
   | "EXECUTING"
   | "VERIFYING"
@@ -49,6 +50,8 @@ export interface Evidence {
   exitCode?: number;
   jobId?: string;
   workspaceId?: string;
+  /** Set server-side so semantic failures cannot be fabricated in a checkpoint. */
+  provenance?: "harness-tool" | "checkpoint";
 }
 
 export interface JobSnapshot {
@@ -85,6 +88,8 @@ export interface VerificationRequirement {
   required: boolean;
   expectedDomain?: Evidence["executionDomain"];
   expectedClaimType?: Evidence["claimType"];
+  /** Exact trusted-tool source required for specialized assertions. */
+  expectedEvidenceSource?: string;
   status: VerificationStatus;
   evidenceIds: string[];
   note?: string;
@@ -154,12 +159,13 @@ export interface ProjectContract {
   inputs?: InputManifestEntry[];
 }
 
-export type JobPurpose = "baseline" | "parse" | "verification" | "incremental-confirmation" | "qemu";
+export type JobPurpose = "baseline" | "diagnostic" | "parse" | "verification" | "incremental-confirmation" | "qemu";
 
 export interface VerificationAttempt {
   iteration: number;
   jobId: string;
   fingerprint: string;
+  inputFingerprint?: string;
   target: string;
   status: JobStatus;
   createdAt: string;
@@ -209,6 +215,7 @@ export interface JobRecord {
   taskId: string;
   kind: JobKind;
   purpose: JobPurpose;
+  sourceJobId?: string;
   iteration?: number;
   fingerprint: string;
   executable: string;
@@ -277,7 +284,7 @@ export interface ChangeSetRecord {
   decisionAnalysis?: DecisionAnalysis;
   status: "PREPARED" | "APPROVED" | "APPLIED" | "FAILED";
   approvalId?: string;
-  preflight: Array<{ kind: "patch-syntax" | "patch-applicability" | "metadata-review"; path: string; passed: boolean; detail: string }>;
+  preflight: Array<{ kind: "patch-syntax" | "patch-applicability" | "metadata-review" | "semantic-review"; path: string; passed: boolean; detail: string }>;
   createdAt: string;
   appliedAt?: string;
   error?: string;

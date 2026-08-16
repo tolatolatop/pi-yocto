@@ -5,6 +5,8 @@ import type { LocatedConfig } from "./config.js";
 import { ApprovalStore } from "./approval.js";
 import { newId, pathExists, readJson, sha256, withFileLock, writeJsonAtomic, writeTextAtomic } from "./fs-utils.js";
 import { runCommand } from "./process.js";
+import { validateFileMirrorRules } from "./mirror.js";
+import { semanticMetadataFindings } from "./review.js";
 import { TaskStore } from "./state.js";
 import type { ChangeOperation, ChangeSetRecord, DecisionAnalysis } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
@@ -66,7 +68,7 @@ async function validatePatch(content: string, path: string, baseDir?: string): P
   return results;
 }
 
-function validateMetadata(content: string, path: string): ChangeSetRecord["preflight"] {
+async function validateMetadata(located: LocatedConfig, content: string, path: string): Promise<ChangeSetRecord["preflight"]> {
   const failures: string[] = [];
   if (content.includes("\0")) failures.push("contains NUL bytes");
   if (/^(?:<{7}|={7}|>{7})/m.test(content)) failures.push("contains merge conflict markers");
@@ -74,7 +76,138 @@ function validateMetadata(content: string, path: string): ChangeSetRecord["prefl
   // require/include. The post-apply include-aware yocto_review performs the
   // workspace-bound check; do not force the model to duplicate those fields.
   if (extname(path) === ".bb" && !/^LICENSE\s*(?:\?|\+|:)?=/m.test(content) && !/^\s*(?:require|include)\s+\S+/m.test(content)) failures.push("recipe does not declare LICENSE or a resolvable include");
-  return [{ kind: "metadata-review", path, passed: failures.length === 0, detail: failures.join("; ") || "Basic metadata preflight passed" }];
+  if (extname(path) === ".conf") failures.push(...validateFileMirrorRules(content));
+  const results: ChangeSetRecord["preflight"] = [{ kind: "metadata-review", path, passed: failures.length === 0, detail: failures.join("; ") || "Basic metadata preflight passed" }];
+  for (const finding of await semanticMetadataFindings(located, path, content)) {
+    results.push({ kind: "semantic-review", path, passed: finding.severity !== "error", detail: `${finding.rule}: ${finding.message}` });
+  }
+  return results;
+}
+
+function plannedWriteMap(operations: ChangeOperation[]): Map<string, string> {
+  return new Map(operations.flatMap((operation) => operation.kind === "write" ? [[resolve(operation.path), operation.content] as const] : []));
+}
+
+async function plannedPathExists(path: string, writes: Map<string, string>, operations: ChangeOperation[]): Promise<boolean> {
+  const absolute = resolve(path);
+  if (writes.has(absolute)) return true;
+  if (operations.some((operation) => operation.kind === "rename" && resolve(operation.destination) === absolute)) return true;
+  return pathExists(absolute);
+}
+
+function recipeName(path: string): string {
+  return path.split("/").at(-1)?.replace(/\.(?:bb|bbappend)$/, "").split("_")[0] ?? "";
+}
+
+function staticFileUris(content: string): string[] {
+  return [...content.matchAll(/file:\/\/([^\s"'\\;]+)/g)]
+    .map((match) => match[1] ?? "")
+    .filter((value) => value && !value.includes("${") && !value.startsWith("/"));
+}
+
+function fileSearchDirectories(recipe: string, content: string): string[] {
+  const directory = dirname(recipe);
+  const name = recipeName(recipe);
+  const directories = [join(directory, "files"), join(directory, name), directory];
+  for (const match of content.matchAll(/FILESEXTRAPATHS(?::[^\s=]+)*\s*(?::=|=)\s*"([^"]*)"/g)) {
+    for (const token of (match[1] ?? "").split(":")) {
+      if (!token) continue;
+      const expanded = token.replaceAll("${THISDIR}", directory).replaceAll("${PN}", name).replaceAll("${BPN}", name);
+      if (!expanded.includes("${")) directories.push(resolve(directory, expanded));
+    }
+  }
+  return [...new Set(directories.map((path) => resolve(path)))];
+}
+
+function configuredBblayers(content: string, located: LocatedConfig): Set<string> {
+  const layers = new Set<string>();
+  const normalized = content.replace(/\\\r?\n/g, " ");
+  for (const match of normalized.matchAll(/BBLAYERS(?:[:_][^\s=]+)*\s*(?:\?\?=|\?=|\+=|=\+|:=|=)\s*"([^"]*)"/g)) {
+    for (const token of (match[1] ?? "").split(/\s+/).filter(Boolean)) {
+      const expanded = token
+        .replaceAll("${TOPDIR}", located.config.buildDir)
+        .replaceAll("${COREBASE}", located.config.sourceDir)
+        .replaceAll("${OEROOT}", located.config.sourceDir);
+      if (!expanded.includes("${")) layers.add(resolve(located.config.buildDir, expanded));
+    }
+  }
+  return layers;
+}
+
+function globPattern(pattern: string): RegExp {
+  let source = "^";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index] as string;
+    if (character === "*" && pattern[index + 1] === "*") { source += ".*"; index += 1; }
+    else if (character === "*") source += "[^/]*";
+    else if (character === "?") source += "[^/]";
+    else source += character.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+  }
+  return new RegExp(`${source}$`);
+}
+
+function configuredBbfiles(content: string, layerDir: string): string[] {
+  const patterns: string[] = [];
+  const normalized = content.replace(/\\\r?\n/g, " ");
+  for (const match of normalized.matchAll(/BBFILES(?:[:_][^\s=]+)*\s*(?:\?\?=|\?=|\+=|=\+|:=|=)\s*"([^"]*)"/g)) {
+    for (const token of (match[1] ?? "").split(/\s+/).filter(Boolean)) {
+      const expanded = token.replaceAll("${LAYERDIR}", layerDir);
+      if (!expanded.includes("${")) patterns.push(resolve(layerDir, expanded));
+    }
+  }
+  return patterns;
+}
+
+async function validateMetadataGraph(located: LocatedConfig, operations: ChangeOperation[]): Promise<ChangeSetRecord["preflight"]> {
+  const results: ChangeSetRecord["preflight"] = [];
+  const writes = plannedWriteMap(operations);
+  for (const [path, content] of writes) {
+    if (![".bb", ".bbappend"].includes(extname(path))) continue;
+    for (const uri of staticFileUris(content)) {
+      const candidates = fileSearchDirectories(path, content).map((directory) => resolve(directory, uri));
+      const found = (await Promise.all(candidates.map((candidate) => plannedPathExists(candidate, writes, operations)))).some(Boolean);
+      results.push({
+        kind: "semantic-review",
+        path,
+        passed: found,
+        detail: found ? `file://${uri} resolves inside the planned recipe FILESPATH` : `file://${uri} is missing from the planned recipe FILESPATH; checked ${candidates.join(", ")}`
+      });
+    }
+  }
+
+  const changedPaths = operations.flatMap((operation) => operation.kind === "rename" ? [operation.path, operation.destination] : [operation.path]).map((path) => resolve(path));
+  const bblayersPath = resolve(located.config.buildDir, "conf", "bblayers.conf");
+  const bblayersContent = writes.get(bblayersPath) ?? await readFile(bblayersPath, "utf8").catch(() => "");
+  const registered = configuredBblayers(bblayersContent, located);
+  for (const configuredLayer of located.config.layers.map((layer) => resolve(layer))) {
+    if (!changedPaths.some((path) => within(path, configuredLayer))) continue;
+    const layerConf = resolve(configuredLayer, "conf", "layer.conf");
+    if (!(await plannedPathExists(layerConf, writes, operations))) continue;
+    const registeredLayer = registered.has(configuredLayer);
+    results.push({
+      kind: "semantic-review",
+      path: layerConf,
+      passed: registeredLayer,
+      detail: registeredLayer ? `Layer is registered exactly in ${bblayersPath}` : `Changed layer ${configuredLayer} is not registered by the planned ${bblayersPath}; include that file in the same ChangeSet`
+    });
+
+    const recipePaths = changedPaths.filter((path) => within(path, configuredLayer) && [".bb", ".bbappend"].includes(extname(path)));
+    if (!recipePaths.length) continue;
+    const layerContent = writes.get(layerConf) ?? await readFile(layerConf, "utf8").catch(() => "");
+    const patterns = configuredBbfiles(layerContent, configuredLayer);
+    for (const recipePath of recipePaths) {
+      const matched = patterns.some((pattern) => globPattern(pattern).test(recipePath));
+      results.push({
+        kind: "semantic-review",
+        path: recipePath,
+        passed: matched,
+        detail: matched
+          ? `Recipe path is covered by layer BBFILES (${patterns.join(", ")})`
+          : `Recipe path is not covered by any BBFILES pattern in ${layerConf}; patterns=${patterns.join(", ") || "none"}`
+      });
+    }
+  }
+  return results;
 }
 
 export class ChangeSetStore {
@@ -107,7 +240,7 @@ export class ChangeSetStore {
 export async function prepareChangeSet(located: LocatedConfig, input: { taskId: string; objective: string; changes: ProposedChange[]; patchBaseDir?: string; decisionAnalysis?: DecisionAnalysis }): Promise<ChangeSetRecord> {
   if (!input.changes.length) throw new Error("A change set requires at least one operation");
   const task = await new TaskStore(located).load(input.taskId);
-  if (!["PLANNING", "WAITING_HUMAN"].includes(task.phase)) throw new Error(`Task ${input.taskId} must be in PLANNING/WAITING_HUMAN before preparing a ChangeSet`);
+  if (!["PLANNING", "REPLANNING", "WAITING_HUMAN"].includes(task.phase)) throw new Error(`Task ${input.taskId} must be in PLANNING/REPLANNING/WAITING_HUMAN before preparing a ChangeSet; currentPhase=${task.phase}; allowedNextActions=inspect-or-request-controlled-replan`);
   const operations: ChangeOperation[] = [];
   const preflight: ChangeSetRecord["preflight"] = [];
   const seen = new Set<string>();
@@ -120,7 +253,7 @@ export async function prepareChangeSet(located: LocatedConfig, input: { taskId: 
       const before = await readFile(path).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? undefined : Promise.reject(error));
       operations.push({ kind: "write", path, content: proposed.content, ...(before ? { beforeSha256: sha256(before) } : {}), afterSha256: sha256(proposed.content) });
       if ([".patch", ".diff"].includes(extname(path))) preflight.push(...await validatePatch(proposed.content, path, input.patchBaseDir));
-      else if ([".bb", ".bbappend", ".inc", ".conf", ".bbclass", ".cfg"].includes(extname(path))) preflight.push(...validateMetadata(proposed.content, path));
+      else if ([".bb", ".bbappend", ".inc", ".conf", ".bbclass", ".cfg"].includes(extname(path))) preflight.push(...await validateMetadata(located, proposed.content, path));
     } else {
       if (!proposed.destination) throw new Error(`Rename operation requires destination: ${path}`);
       const destination = validateChangePath(located, proposed.destination);
@@ -131,6 +264,7 @@ export async function prepareChangeSet(located: LocatedConfig, input: { taskId: 
       operations.push({ kind: "rename", path, destination, beforeSha256: sha256(await readFile(path)) });
     }
   }
+  preflight.push(...await validateMetadataGraph(located, operations));
   const blocking = preflight.filter((item) => !item.passed);
   if (blocking.length) throw new Error(`Change set preflight failed: ${blocking.map((item) => `${item.path}: ${item.detail}`).join("; ")}`);
   const files = [...new Set(operations.flatMap((operation) => operation.kind === "rename" ? [operation.path, operation.destination] : [operation.path]))].sort();

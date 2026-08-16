@@ -3,11 +3,10 @@ import { spawn } from "node:child_process";
 import { open } from "node:fs/promises";
 import { findConfig } from "./config.js";
 import { GuestCommandStore, quoteGuestArg } from "./guest.js";
-import { jobEvidenceVariants, JobStore } from "./jobs.js";
+import { collectJobArtifacts, jobEvidenceVariants, JobStore } from "./jobs.js";
 import { captureBitbakeEnvironment, readBootId, readProcessStartTicks } from "./process.js";
 import type { JobRecord } from "./types.js";
 import type { GuestCommandRecord } from "./types.js";
-import { inspectWorkspace } from "./workspace.js";
 import { TaskStore } from "./state.js";
 
 function arg(name: string): string {
@@ -148,7 +147,7 @@ async function main(): Promise<void> {
     const status = result.code === 0 ? "SUCCEEDED" : "FAILED";
     await write(`\n[pi-yocto] completed status=${status} exit=${result.code ?? "null"} signal=${result.signal ?? "none"}\n`);
     const logOffset = (await log.stat()).size;
-    const artifacts = status === "SUCCEEDED" ? (await inspectWorkspace(located, false)).artifacts : [];
+    const artifacts = status === "SUCCEEDED" ? await collectJobArtifacts(located, job) : [];
     await save({ status, exitCode: result.code ?? 128, ...(result.signal ? { signal: result.signal } : {}), completedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(), logOffset, artifacts });
     const tasks = new TaskStore(located);
     await tasks.updateJobStatus(job.taskId, job.id, status, job.completedAt).catch(() => undefined);

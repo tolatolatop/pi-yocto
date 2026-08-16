@@ -57,10 +57,10 @@ cache.command("native")
   });
 
 const job = program.command("job").description("Manage detached BitBake/QEMU/check jobs");
-job.command("start").requiredOption("--kind <kind>", "bitbake, qemu, or check").requiredOption("--purpose <purpose>", "baseline, parse, verification, incremental-confirmation, or qemu").requiredOption("--task <id>").option("--iteration <number>").option("--retry-interrupted").argument("[args...]").action(async (args: string[], options: { kind: string; purpose: string; task: string; iteration?: string; retryInterrupted?: boolean }) => {
+job.command("start").requiredOption("--kind <kind>", "bitbake, qemu, or check").requiredOption("--purpose <purpose>", "baseline, diagnostic, parse, verification, incremental-confirmation, or qemu").requiredOption("--task <id>").option("--iteration <number>").option("--source-job <id>", "successful image JobRecord required by qemu").option("--retry-interrupted").argument("[args...]").action(async (args: string[], options: { kind: string; purpose: string; task: string; iteration?: string; sourceJob?: string; retryInterrupted?: boolean }) => {
   if (!(["bitbake", "qemu", "check"] as string[]).includes(options.kind)) throw new Error(`Unknown job kind ${options.kind}`);
-  if (!(["baseline", "parse", "verification", "incremental-confirmation", "qemu"] as string[]).includes(options.purpose)) throw new Error(`Unknown job purpose ${options.purpose}`);
-  const record = await startJob(await findConfig(), { kind: options.kind as "bitbake" | "qemu" | "check", purpose: options.purpose as "baseline" | "parse" | "verification" | "incremental-confirmation" | "qemu", taskId: options.task, args, ...(options.iteration ? { iteration: Number(options.iteration) } : {}), ...(options.retryInterrupted ? { retryInterrupted: true } : {}) });
+  if (!(["baseline", "diagnostic", "parse", "verification", "incremental-confirmation", "qemu"] as string[]).includes(options.purpose)) throw new Error(`Unknown job purpose ${options.purpose}`);
+  const record = await startJob(await findConfig(), { kind: options.kind as "bitbake" | "qemu" | "check", purpose: options.purpose as "baseline" | "diagnostic" | "parse" | "verification" | "incremental-confirmation" | "qemu", taskId: options.task, args, ...(options.iteration ? { iteration: Number(options.iteration) } : {}), ...(options.sourceJob ? { sourceJobId: options.sourceJob } : {}), ...(options.retryInterrupted ? { retryInterrupted: true } : {}) });
   process.stdout.write(`${JSON.stringify(record, null, 2)}\n`);
 });
 job.command("list").action(async () => {
@@ -96,7 +96,8 @@ task.command("status").argument("[id]").action(async (id?: string) => {
 task.command("resume").argument("<id>").action(async (id: string) => {
   const store = new TaskStore(await findConfig()); const record = await store.load(id); const checkpoint = record.checkpoints.at(-1);
   if (!checkpoint) throw new Error(`Task ${id} has no checkpoint`);
-  const resumed = ["PAUSED", "FAILED"].includes(record.phase) ? await store.transition(id, checkpoint.phase === record.phase ? "INSPECTING" : checkpoint.phase) : record;
+  if (record.phase === "FAILED") throw new Error(`Task ${id} is terminal FAILED; create a new TaskRecord and reference this task's evidence instead of reopening it`);
+  const resumed = record.phase === "PAUSED" ? await store.transition(id, checkpoint.phase === record.phase ? "INSPECTING" : checkpoint.phase) : record;
   process.stdout.write(`${JSON.stringify({ task: resumed, resumeAction: checkpoint.resumeAction, pendingSteps: checkpoint.pendingSteps }, null, 2)}\n`);
 });
 task.command("export").argument("<id>").option("--output <path>").action(async (id: string, options: { output?: string }) => {

@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { LocatedConfig } from "../src/config.js";
 import { writeJsonAtomic } from "../src/fs-utils.js";
+import { JobStore } from "../src/jobs.js";
 import { TaskStore } from "../src/state.js";
-import type { TaskRecord, WorkspaceConfig } from "../src/types.js";
+import type { JobRecord, TaskRecord, WorkspaceConfig } from "../src/types.js";
 import { SCHEMA_VERSION } from "../src/types.js";
 
 export interface TestWorkspace extends LocatedConfig {
@@ -47,4 +48,41 @@ export async function enterExecutablePhase(located: LocatedConfig, objective = "
   task = await store.transition(task.id, "EXECUTING");
   if (phase === "VERIFYING") task = await store.transition(task.id, "VERIFYING");
   return store.checkpoint(task.id, { objective, phase, modifiedFiles: [], evidenceIds: [], completedSteps: ["prepared"], pendingSteps: ["verify"], jobIds: [], logOffsets: {}, resumeAction: "resume verification" });
+}
+
+export async function recordSuccessfulImageJob(located: LocatedConfig, taskId: string, target = "test-image"): Promise<JobRecord> {
+  const deploy = join(located.config.tmpDir ?? join(located.config.buildDir, "tmp"), "deploy", "images", located.config.machine);
+  const bootConfig = join(deploy, `${target}-${located.config.machine}.rootfs.qemuboot.conf`);
+  await mkdir(deploy, { recursive: true });
+  await writeFile(bootConfig, "QB_SYSTEM_NAME = qemu-system-x86_64\n", "utf8");
+  const store = new JobStore(located);
+  const now = new Date().toISOString();
+  const id = `job-source-${target}`;
+  const record: JobRecord = {
+    schemaVersion: SCHEMA_VERSION,
+    id,
+    taskId,
+    kind: "bitbake",
+    purpose: "verification",
+    iteration: 1,
+    fingerprint: `fixture-${target}`,
+    executable: "bitbake",
+    args: [target],
+    cwd: located.config.buildDir,
+    status: "SUCCEEDED",
+    createdAt: now,
+    startedAt: now,
+    completedAt: now,
+    exitCode: 0,
+    logPath: store.logPath(id),
+    logOffset: 1,
+    artifacts: [bootConfig]
+  };
+  await mkdir(join(located.stateDir, "jobs"), { recursive: true });
+  await writeFile(record.logPath, "ok\n", "utf8");
+  await store.save(record);
+  const tasks = new TaskStore(located);
+  const task = await tasks.load(taskId);
+  await tasks.save({ ...task, jobIds: [...new Set([...task.jobIds, id])] });
+  return record;
 }

@@ -6,7 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piYoctoExtension from "../src/extension.js";
 import { JobStore, reconcileJob } from "../src/jobs.js";
 import { TaskStore } from "../src/state.js";
-import { createTestWorkspace, writeExecutable } from "./fixture.js";
+import { createTestWorkspace, recordSuccessfulImageJob, writeExecutable } from "./fixture.js";
 
 test("Pi extension registers the complete Poky tool and slash-command surface", () => {
   const tools: string[] = []; const commands: string[] = []; const events: string[] = [];
@@ -18,9 +18,9 @@ test("Pi extension registers the complete Poky tool and slash-command surface", 
   } as unknown as ExtensionAPI;
   piYoctoExtension(mock);
   assert.deepEqual(tools.sort(), [
-    "yocto_approval_request", "yocto_change_apply", "yocto_change_prepare", "yocto_checkpoint", "yocto_guest_exec",
+    "yocto_approval_request", "yocto_artifact_assert", "yocto_change_apply", "yocto_change_prepare", "yocto_checkpoint", "yocto_completion_status", "yocto_guest_assert", "yocto_guest_exec",
     "yocto_job_start", "yocto_job_status", "yocto_job_stop", "yocto_job_tail", "yocto_knowledge_search", "yocto_log_analyze",
-    "yocto_metadata_query", "yocto_mirror_preflight", "yocto_native_cache_inspect", "yocto_review", "yocto_task_open", "yocto_task_status",
+    "yocto_metadata_query", "yocto_mirror_preflight", "yocto_native_cache_inspect", "yocto_optimization_assert", "yocto_review", "yocto_task_finalize", "yocto_task_open", "yocto_task_replan", "yocto_task_status", "yocto_tmux",
     "yocto_verification_plan", "yocto_verification_update", "yocto_workspace_inspect"
   ]);
   assert.ok(commands.includes("yocto-diagnose"));
@@ -29,11 +29,70 @@ test("Pi extension registers the complete Poky tool and slash-command surface", 
   assert.ok(events.includes("session_start"));
 });
 
+test("--disable bash removes native bash while preserving the tmux tool", async () => {
+  const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
+  let active = ["read", "bash", "yocto_tmux", "yocto_task_open"];
+  const flags = new Map<string, string>([["disable", "bash"]]);
+  const mock = {
+    registerTool() {}, registerCommand() {}, registerFlag() {}, sendUserMessage() {},
+    getFlag(name: string) { return flags.get(name); }, getActiveTools() { return active; }, setActiveTools(names: string[]) { active = names; },
+    on(name: string, handler: (...args: unknown[]) => Promise<unknown>) { handlers.set(name, handler); }
+  } as unknown as ExtensionAPI;
+  piYoctoExtension(mock);
+  const start = handlers.get("session_start");
+  assert.ok(start);
+  await start({}, { cwd: process.cwd(), hasUI: false, sessionManager: { getSessionId: () => "disable-bash" } });
+  assert.equal(active.includes("bash"), false);
+  assert.equal(active.includes("yocto_tmux"), true);
+});
+
+test("generic approval tool rejects reserved stop_job approvals", async () => {
+  const located = await createTestWorkspace("pi-yocto-reserved-approval-");
+  const registered = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
+  const mock = {
+    registerTool(tool: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) { registered.set(tool.name, tool); },
+    registerCommand() {}, on() {}, sendUserMessage() {}
+  } as unknown as ExtensionAPI;
+  piYoctoExtension(mock);
+  const ctx = { cwd: located.rootDir, hasUI: false, sessionManager: { getSessionId: () => "reserved-approval-session" } };
+  const open = registered.get("yocto_task_open");
+  const approval = registered.get("yocto_approval_request");
+  assert.ok(open && approval);
+  const opened = await open.execute("open", { objective: "reject generic stop approval" }, undefined, undefined, ctx) as { details: { task: { id: string } } };
+  await assert.rejects(() => approval.execute("approval", {
+    taskId: opened.details.task.id,
+    action: "stop_job",
+    command: "stop job-test",
+    impact: "stop",
+    risk: "partial output",
+    recovery: "restart"
+  }, undefined, undefined, ctx), /call yocto_job_stop/);
+});
+
 test("Pi package manifest points to emitted extension, CLI, and pinned pi-agents", async () => {
   const packageJson = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8")) as { bin: Record<string, string>; pi: { extensions: string[] }; dependencies: Record<string, string> };
   assert.equal(packageJson.bin["pi-yocto"], "./dist/src/cli.js");
   assert.equal(packageJson.dependencies["pi-agents"], "0.2.1");
   for (const path of packageJson.pi.extensions) await access(join(process.cwd(), path));
+});
+
+test("extension blocks generic directory creation and direct process termination", async () => {
+  const located = await createTestWorkspace("pi-yocto-extension-policy-");
+  const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
+  const mock = {
+    registerTool() {}, registerCommand() {}, sendUserMessage() {},
+    on(name: string, handler: (...args: unknown[]) => Promise<unknown>) { handlers.set(name, handler); }
+  } as unknown as ExtensionAPI;
+  piYoctoExtension(mock);
+  const handler = handlers.get("tool_call");
+  assert.ok(handler);
+  const ctx = { cwd: located.rootDir, hasUI: false, sessionManager: { getSessionId: () => "policy-session" } };
+  const mkdirDecision = await handler({ toolName: "bash", input: { command: "mkdir -p /tmp/unapproved-layer" } }, ctx) as { block?: boolean; reason?: string };
+  assert.equal(mkdirDecision.block, true);
+  assert.match(mkdirDecision.reason ?? "", /protected writes/);
+  const killDecision = await handler({ toolName: "bash", input: { command: "kill -TERM 1234" } }, ctx) as { block?: boolean; reason?: string };
+  assert.equal(killDecision.block, true);
+  assert.match(killDecision.reason ?? "", /yocto_job_stop/);
 });
 
 test("metadata tool persists returned Evidence before verification update", async () => {
@@ -76,7 +135,8 @@ test("metadata tool persists returned Evidence before verification update", asyn
   let task = await tasks.load(taskId);
   for (const phase of ["INSPECTING", "PLANNING", "EXECUTING", "VERIFYING"] as const) task = await tasks.transition(task.id, phase);
   await tasks.checkpoint(task.id, { objective: task.objective, phase: "VERIFYING", modifiedFiles: [], evidenceIds: [], completedSteps: ["prepared"], pendingSteps: ["guest"], jobIds: [], logOffsets: {} });
-  const started = await start.execute("start", { kind: "qemu", purpose: "qemu", args: ["nographic"], iteration: 1 }, undefined, undefined, ctx) as { details: { job: { id: string } } };
+  const source = await recordSuccessfulImageJob(located, task.id);
+  const started = await start.execute("start", { kind: "qemu", purpose: "qemu", args: ["test-image"], iteration: 1, sourceJobId: source.id }, undefined, undefined, ctx) as { details: { job: { id: string } } };
   const jobs = new JobStore(located);
   let qemu = await jobs.load(started.details.job.id);
   for (let attempt = 0; attempt < 50 && qemu.status !== "RUNNING"; attempt += 1) {

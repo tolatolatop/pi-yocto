@@ -14,9 +14,9 @@
           "cache": { "kind": "spawn", "agent": "performance-analyst", "task": "Analyze sstate reuse, download availability, disk and scheduler evidence. Do not clean anything.", "scope": "project", "output": "json" }
         }
       },
-      { "kind": "join", "from": "performance-fork", "mode": "all", "onFailure": "collectErrors", "reducer": { "kind": "agent", "agent": "evidence-summarizer", "task": "Open the supplied TaskRecord. Merge baseline analyses, define like-for-like verification requirements, and checkpoint PLANNING with measurable changes requiring content-bound approval.", "output": "json" } },
-      { "kind": "spawn", "agent": "layer-engineer", "task": "Open the supplied TaskRecord. Prepare one exact ChangeSet and apply only after its content-bound approval; otherwise stop without editing.", "scope": "project", "output": "json" },
-      { "kind": "spawn", "agent": "verifier", "task": "Open the supplied TaskRecord. If approved changes were applied, checkpoint VERIFYING and repeat identical target/settings at the bounded iteration; record like-for-like Evidence. Otherwise start no job.", "scope": "project", "output": "json" }
+      { "kind": "join", "from": "performance-fork", "mode": "all", "onFailure": "collectErrors", "reducer": { "kind": "agent", "agent": "evidence-summarizer", "task": "Open the supplied TaskRecord. Merge baseline analyses, capture any target/non-target optimization fingerprints, define like-for-like verification requirements, and checkpoint PLANNING with measurable changes requiring content-bound approval.", "output": "json" } },
+      { "kind": "spawn", "agent": "layer-engineer", "task": "Open the supplied TaskRecord. Prepare one exact ChangeSet and apply only after its content-bound approval. For recipe-only optimization mutate TARGET_CFLAGS locally, remove the inherited -O flag before appending the new one, and never change global flags; otherwise stop without editing.", "scope": "project", "output": "json" },
+      { "kind": "spawn", "agent": "verifier", "task": "Open the supplied TaskRecord. If approved changes were applied, checkpoint VERIFYING, consume verificationReadiness, and repeat identical target/settings at the bounded iteration. Use yocto_optimization_assert with compiler argv and the baseline non-target fingerprint when flags are in scope. Otherwise start no job.", "scope": "project", "output": "json" }
     ]
   },
   "budgets": { "maxDepth": 4, "maxChildren": 12, "maxParallelism": 3, "maxIterations": 2 },

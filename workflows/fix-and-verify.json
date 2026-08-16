@@ -24,12 +24,12 @@
         "body": {
           "kind": "sequence",
           "steps": [
-            { "kind": "spawn", "agent": "layer-engineer", "task": "Open the supplied TaskRecord. Prepare an immutable content-bound ChangeSet and apply only after exact human approval. For a repair after failed verification, checkpoint VERIFYING -> EXECUTING; if approval is unavailable, stop without edits.", "scope": "project", "output": "json" },
-            { "kind": "spawn", "agent": "verifier", "task": "Open the supplied TaskRecord. Checkpoint VERIFYING and use the current loop number as verification iteration 1 or 2. Record job/guest Evidence and return done=true only when the persisted contract passes.", "scope": "project", "output": "json" }
+            { "kind": "spawn", "agent": "layer-engineer", "task": "Open the supplied TaskRecord. For a repair after failed verification, call yocto_task_replan with its failed current-run Evidence before preparing a revised immutable ChangeSet. Apply only after exact human approval; if approval is unavailable, stop without edits.", "scope": "project", "output": "json" },
+            { "kind": "spawn", "agent": "verifier", "task": "Open the supplied TaskRecord. Checkpoint VERIFYING, execute every verificationReadiness requirement, and use the current loop number as verification iteration 1 or 2. Mark semantic assertion failures FAILED with their trusted Evidence so controlled replanning remains legal. Return done=true only when the persisted contract passes.", "scope": "project", "output": "json" }
           ]
         }
       },
-      { "kind": "spawn", "agent": "evidence-summarizer", "task": "Open the supplied TaskRecord. Reconcile the evidence ledger, ChangeSet, approvals, jobs and verification results. Checkpoint COMPLETED with finalSummary only if all requirements passed; otherwise FAILED/PAUSED with unresolved risks and resume action.", "scope": "project", "output": "json" }
+      { "kind": "spawn", "agent": "evidence-summarizer", "task": "Open the supplied TaskRecord. Reconcile the evidence ledger, ChangeSet, approvals, jobs and verification results. Call yocto_completion_status and use yocto_task_finalize only if all requirements passed; otherwise request controlled replanning when eligible, checkpoint PAUSED when resumable, and use terminal FAILED only when no legal recovery remains.", "scope": "project", "output": "json" }
     ]
   },
   "budgets": { "maxDepth": 4, "maxChildren": 16, "maxParallelism": 3, "maxIterations": 2 },

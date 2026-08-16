@@ -6,7 +6,7 @@ import { mkdtemp } from "node:fs/promises";
 import { test } from "node:test";
 import { findConfig } from "../src/config.js";
 import { writeJsonAtomic } from "../src/fs-utils.js";
-import { jobEvidenceVariants, JobStore, normalizeQemuArgs, reconcileJob, startJob, stopJob, tailJob } from "../src/jobs.js";
+import { collectJobArtifacts, jobEvidenceVariants, JobStore, normalizeQemuArgs, reconcileJob, startJob, stopJob, tailJob } from "../src/jobs.js";
 import { readBootId, runCommand } from "../src/process.js";
 import { TaskStore } from "../src/state.js";
 import type { JobRecord, WorkspaceConfig } from "../src/types.js";
@@ -81,6 +81,30 @@ test("baseline jobs can run before planning without opening the implementation p
   const { job } = await startJob(located, { kind: "bitbake", purpose: "baseline", taskId: task.id, args: ["smoke"] });
   assert.equal(job.purpose, "baseline");
   assert.equal((await tasks.load(task.id)).phase, "INSPECTING");
+});
+
+test("diagnostic jobs reproduce failures during INSPECTING without consuming fix iterations", async () => {
+  const located = await fixture();
+  const tasks = new TaskStore(located);
+  let task = await tasks.create("reproduce before changing metadata");
+  task = await tasks.transition(task.id, "INSPECTING");
+  await tasks.checkpoint(task.id, { objective: task.objective, phase: "INSPECTING", modifiedFiles: [], evidenceIds: [], completedSteps: ["inspected"], pendingSteps: ["diagnose"], jobIds: [], logOffsets: {} });
+  const { job } = await startJob(located, { kind: "bitbake", purpose: "diagnostic", taskId: task.id, args: ["smoke"] });
+  assert.equal(job.purpose, "diagnostic");
+  assert.equal((await tasks.load(task.id)).currentFixIteration, 0);
+});
+
+test("artifact collection is target-bound and excludes unrelated deploy files", async () => {
+  const located = await fixture();
+  const deploy = join(located.config.buildDir, "tmp", "deploy", "images", located.config.machine);
+  await mkdir(deploy, { recursive: true });
+  const wanted = join(deploy, `wanted-image-${located.config.machine}.rootfs.qemuboot.conf`);
+  const related = join(deploy, `wanted-image-${located.config.machine}.rootfs.wic`);
+  const unrelated = join(deploy, `other-image-${located.config.machine}.rootfs.qemuboot.conf`);
+  await Promise.all([writeFile(wanted, "boot\n"), writeFile(related, "image\n"), writeFile(unrelated, "other\n")]);
+  const artifacts = await collectJobArtifacts(located, { kind: "bitbake", args: ["wanted-image"] });
+  assert.deepEqual(artifacts, [wanted, related].sort());
+  assert.equal(artifacts.includes(unrelated), false);
 });
 
 test("QEMU image targets resolve to the current unique qemuboot configuration", async () => {

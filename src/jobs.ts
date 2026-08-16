@@ -8,7 +8,7 @@ import { workspaceIdentity } from "./contracts.js";
 import { readBootId, readProcessStartTicks } from "./process.js";
 import { validateBitbakeJobArgs } from "./policy.js";
 import { TaskStore } from "./state.js";
-import type { Evidence, JobKind, JobPurpose, JobRecord } from "./types.js";
+import type { ChangeSetRecord, Evidence, JobKind, JobPurpose, JobRecord, TaskRecord } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
 function isAlive(pid: number): boolean {
@@ -49,6 +49,7 @@ export interface StartJobInput {
   purpose: JobPurpose;
   iteration?: number;
   retryInterrupted?: boolean;
+  sourceJobId?: string;
 }
 
 export interface StartJobResult { job: JobRecord; reused: boolean; }
@@ -111,14 +112,62 @@ export async function normalizeQemuArgs(located: LocatedConfig, input: string[])
   return normalized;
 }
 
+function bitbakeTargets(args: string[]): string[] {
+  return args.filter((argument) => !argument.startsWith("-"));
+}
+
+/** Return only deploy artifacts whose basename is produced for this job's targets. */
+export async function collectJobArtifacts(located: LocatedConfig, job: Pick<JobRecord, "kind" | "args">): Promise<string[]> {
+  if (job.kind !== "bitbake") return [];
+  const targets = bitbakeTargets(job.args);
+  if (!targets.length) return [];
+  const deploy = resolve(located.config.tmpDir ?? join(located.config.buildDir, "tmp"), "deploy");
+  if (!(await pathExists(deploy))) return [];
+  const matches: string[] = [];
+  const pending = [deploy];
+  while (pending.length && matches.length < 200) {
+    const directory = pending.pop() as string;
+    for (const entry of await readdir(directory, { withFileTypes: true }).catch(() => [])) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(path);
+      else if ((entry.isFile() || entry.isSymbolicLink()) && targets.some((target) => entry.name === target || entry.name.startsWith(`${target}-`) || entry.name.startsWith(`${target}_`) || entry.name.startsWith(`${target}.`))) matches.push(path);
+    }
+  }
+  return matches.sort();
+}
+
+async function taskInputFingerprint(located: LocatedConfig, task: TaskRecord): Promise<string> {
+  const applied: string[] = [];
+  for (const id of task.changeSetIds) {
+    const path = join(located.stateDir, "changes", `${id}.json`);
+    if (!(await pathExists(path))) continue;
+    const change = await readJson<ChangeSetRecord>(path);
+    if (change.taskId === task.id && change.status === "APPLIED") applied.push(`${change.id}:${change.scopeHash}`);
+  }
+  return sha256(JSON.stringify({ applied: applied.sort(), inputs: (task.inputManifest ?? []).map((item) => `${item.id}:${item.sha256}`).sort() }));
+}
+
 export async function startJob(located: LocatedConfig, input: StartJobInput): Promise<StartJobResult> {
+  const taskStore = new TaskStore(located);
+  const task = await taskStore.load(input.taskId);
   let executable: string;
   let args = [...input.args];
   if (input.kind === "bitbake") {
     validateBitbakeJobArgs(args);
     executable = "bitbake";
   } else if (input.kind === "qemu") {
+    if (!input.sourceJobId) throw new Error("QEMU jobs require sourceJobId bound to a successful image build JobRecord");
+    const source = await reconcileJob(new JobStore(located), input.sourceJobId);
+    if (source.taskId !== input.taskId || source.kind !== "bitbake" || source.purpose !== "verification" || source.status !== "SUCCEEDED") throw new Error(`QEMU source job must be a successful verification BitBake job in TaskRecord ${input.taskId}`);
+    if (!task.jobIds.includes(source.id)) throw new Error(`QEMU source job ${source.id} is not attached to TaskRecord ${input.taskId}`);
     args = await normalizeQemuArgs(located, args);
+    const bootConfig = args.find((argument) => argument.endsWith(".qemuboot.conf"));
+    if (!bootConfig) throw new Error("QEMU jobs must resolve an exact qemuboot.conf from the source image job");
+    const bootCanonical = await realpath(bootConfig).catch(() => resolve(bootConfig));
+    const artifactCanonicals = new Set(await Promise.all(source.artifacts.map((artifact) => realpath(artifact).catch(() => resolve(artifact)))));
+    if (!artifactCanonicals.has(bootCanonical)) throw new Error(`QEMU boot config is not an artifact of source job ${source.id}: ${bootConfig}`);
+    const sourceTargets = bitbakeTargets(source.args);
+    if (!sourceTargets.some((target) => bootConfig.split("/").at(-1)?.startsWith(`${target}-`))) throw new Error(`QEMU boot config does not match source job ${source.id} targets: ${sourceTargets.join(", ")}`);
     executable = join(located.config.sourceDir, "scripts", "runqemu");
   } else {
     if (!args.length) args = ["-p"];
@@ -126,18 +175,24 @@ export async function startJob(located: LocatedConfig, input: StartJobInput): Pr
     executable = "bitbake";
   }
   if (input.kind === "qemu" && input.purpose !== "qemu") throw new Error("QEMU jobs require purpose=qemu");
+  if (input.kind !== "qemu" && input.sourceJobId) throw new Error("sourceJobId is only valid for QEMU jobs");
   if (input.kind === "check" && input.purpose !== "parse") throw new Error("Check jobs require purpose=parse");
   if (input.kind === "bitbake" && ["parse", "qemu"].includes(input.purpose)) throw new Error(`BitBake jobs cannot use purpose=${input.purpose}`);
   const iterativePurpose = ["verification", "parse", "qemu"].includes(input.purpose);
   if (iterativePurpose && input.iteration === undefined) throw new Error(`${input.purpose} jobs require a verification iteration`);
   if (!iterativePurpose && input.iteration !== undefined) throw new Error(`${input.purpose} jobs do not accept a verification iteration`);
-  const taskStore = new TaskStore(located);
-  const task = await taskStore.load(input.taskId);
   const target = args.filter((arg) => !arg.startsWith("-")).join(" ");
-  if (input.purpose === "incremental-confirmation" && !task.verificationAttempts.some((attempt) => attempt.target === target && attempt.status === "SUCCEEDED")) {
-    throw new Error(`Incremental confirmation requires a successful verification job for ${target}`);
+  if (input.purpose === "incremental-confirmation") {
+    let succeeded = false;
+    const jobs = new JobStore(located);
+    for (const attempt of task.verificationAttempts.filter((candidate) => candidate.target === target)) {
+      const current = await reconcileJob(jobs, attempt.jobId);
+      if (current.status === "SUCCEEDED") { succeeded = true; break; }
+    }
+    if (!succeeded) throw new Error(`Incremental confirmation requires a successful verification job for ${target}`);
   }
-  const fingerprint = sha256(JSON.stringify({ taskId: input.taskId, kind: input.kind, purpose: input.purpose, iteration: input.iteration ?? null, executable, args, cwd: located.config.buildDir }));
+  const inputFingerprint = await taskInputFingerprint(located, task);
+  const fingerprint = sha256(JSON.stringify({ taskId: input.taskId, kind: input.kind, purpose: input.purpose, iteration: input.iteration ?? null, sourceJobId: input.sourceJobId ?? null, executable, args, cwd: located.config.buildDir }));
   return withFileLock(join(located.stateDir, "job-start.lock"), async () => {
     const store = new JobStore(located);
     for (const candidate of (await store.list()).filter((job) => job.fingerprint === fingerprint)) {
@@ -154,6 +209,7 @@ export async function startJob(located: LocatedConfig, input: StartJobInput): Pr
       taskId: input.taskId,
       kind: input.kind,
       purpose: input.purpose,
+      ...(input.sourceJobId ? { sourceJobId: input.sourceJobId } : {}),
       ...(input.iteration !== undefined ? { iteration: input.iteration } : {}),
       fingerprint,
       executable,
@@ -168,7 +224,7 @@ export async function startJob(located: LocatedConfig, input: StartJobInput): Pr
     };
     await store.save(record);
     try {
-      await taskStore.reserveJob(input.taskId, { jobId: id, purpose: input.purpose, fingerprint, target, ...(input.iteration !== undefined ? { iteration: input.iteration } : {}) });
+      await taskStore.reserveJob(input.taskId, { jobId: id, purpose: input.purpose, fingerprint, inputFingerprint, target, ...(input.iteration !== undefined ? { iteration: input.iteration } : {}) });
     } catch (error) {
       // A reservation rejection means the command never started. Do not leave a
       // synthetic FAILED JobRecord behind: it would be mistaken for a real
