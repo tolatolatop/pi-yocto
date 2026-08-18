@@ -5,7 +5,7 @@
   "type": "module",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "bin": {
     "pi-yocto": "./dist/src/cli.js"
@@ -29,6 +29,8 @@
   "pi": {
     "extensions": [
       "./dist/src/extension.js",
+      "./node_modules/@llmgates_api/pi-llmgates-provider/dist/index.js",
+      "./node_modules/@llmgates_api/pi-llmgates-provider/dist/tps.js",
       "./node_modules/pi-agents/src/index.ts"
     ]
   },
@@ -40,6 +42,7 @@
     "prepare": "npm run build"
   },
   "dependencies": {
+    "@llmgates_api/pi-llmgates-provider": "0.3.0",
     "ajv": "8.20.0",
     "commander": "14.0.0",
     "minisearch": "7.1.2",

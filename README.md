@@ -2,8 +2,8 @@
 
 `pi-yocto` is an offline-first Pi package and CLI for evidence-backed Yocto/Poky
 diagnosis, approved metadata changes, detached BitBake jobs, and resumable task
-records. Version 0.1.0 targets Linux/WSL2, Node.js 22, Poky scarthgap, and
-`pi-agents` 0.2.1.
+records. Version 0.1.0 targets Linux/WSL2, Node.js 22.19 or newer, Poky
+scarthgap, and `pi-agents` 0.2.1.
 
 The harness keeps commit-safe project configuration in `.pi/yocto.json` and all
 logs, indexes, approvals, jobs, and checkpoints in ignored `.pi-yocto/`. It does
@@ -29,6 +29,27 @@ pi-yocto doctor
 `init` discovers MACHINE, DISTRO, BBLAYERS, DL_DIR and SSTATE_DIR and installs
 the eight project agents plus five fixed workflow specs under `.pi/`. Existing
 agent definitions are never overwritten.
+
+## Configure a NewAPI gateway with LLMGates
+
+`pi-yocto` bundles the LLMGates provider, so a NewAPI or another OpenAI-compatible
+gateway can be configured through Pi without putting credentials in this
+repository:
+
+```text
+pi
+/login
+```
+
+Choose **LLMGates 网关**, then **NewAPI**, and enter an instance ID, display
+name, base URL (normally `https://your-newapi-host/v1`), and API key. Select the
+new provider/model with `/model`; use `/llmgates list` to inspect configured
+instances. LLMGates stores the credential in Pi's user-level `auth.json` and the
+non-secret instance registry under `~/.pi/agent/llmgates/`, not in
+`.pi/yocto.json` or `.pi-yocto/`.
+
+After updating an existing linked installation, run `npm install`, rebuild, and
+use `/reload` (or restart Pi) so the bundled provider is loaded.
 
 ## CLI
 

@@ -69,10 +69,14 @@ test("generic approval tool rejects reserved stop_job approvals", async () => {
   }, undefined, undefined, ctx), /call yocto_job_stop/);
 });
 
-test("Pi package manifest points to emitted extension, CLI, and pinned pi-agents", async () => {
-  const packageJson = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8")) as { bin: Record<string, string>; pi: { extensions: string[] }; dependencies: Record<string, string> };
+test("Pi package manifest points to emitted extensions, CLI, and pinned providers", async () => {
+  const packageJson = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8")) as { bin: Record<string, string>; engines: { node: string }; pi: { extensions: string[] }; dependencies: Record<string, string> };
   assert.equal(packageJson.bin["pi-yocto"], "./dist/src/cli.js");
+  assert.equal(packageJson.engines.node, ">=22.19.0");
   assert.equal(packageJson.dependencies["pi-agents"], "0.2.1");
+  assert.equal(packageJson.dependencies["@llmgates_api/pi-llmgates-provider"], "0.3.0");
+  assert.ok(packageJson.pi.extensions.includes("./node_modules/@llmgates_api/pi-llmgates-provider/dist/index.js"));
+  assert.ok(packageJson.pi.extensions.includes("./node_modules/@llmgates_api/pi-llmgates-provider/dist/tps.js"));
   for (const path of packageJson.pi.extensions) await access(join(process.cwd(), path));
 });
 
