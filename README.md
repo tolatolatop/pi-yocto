@@ -178,3 +178,9 @@ evidence; the harness does not fall back to the network.
 The model-backed acceptance suite is documented in `validation/README.md`. It
 defines ten isolated, near-production E2E development scenarios, common safety
 gates, evaluator-only oracles, required evidence and objective completion criteria.
+
+## Engineering experience library
+
+The documentation-only [engineering experience library](docs/experience/README.md)
+summarizes reusable lessons from the current implementation and historical E2E
+results. It is organized into general problems and scenario-specific playbooks.
